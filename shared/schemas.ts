@@ -1,14 +1,21 @@
 import { z } from "zod";
 import type {
   CompleteAppleJournalImportResponse,
+  CreateEntryInput,
   CreateEntryResponse,
+  DeleteEntryResponse,
   EntryDetail,
   ImportAppleJournalEntryResponse,
   ImportAppleJournalMediaResponse,
   OverviewResponse,
+  RemoveEntryMediaResponse,
+  RestoreEntryResponse,
   SessionResponse,
   StartAppleJournalImportResponse,
   TimelineResponse,
+  UpdateEntryInput,
+  UpdateEntryResponse,
+  UploadEntryMediaResponse,
 } from "./api";
 
 const mediaPreviewSchema = z.object({
@@ -87,10 +94,46 @@ export const entryDetailSchema = timelineEntrySchema.extend({
   timezone: z.string(),
 }) satisfies z.ZodType<EntryDetail>;
 
+export const createEntrySchema = z.object({
+  title: z.string().trim().min(1).max(180),
+  body: z.string().trim().min(1).max(100_000),
+  occurredAt: z.iso.datetime(),
+  timezone: z.string().trim().min(1).max(80),
+  localDate: z.iso.date(),
+  location: z.string().trim().max(180).nullable(),
+  mood: z.string().trim().max(40).nullable(),
+}) satisfies z.ZodType<CreateEntryInput>;
+
+// Editing accepts exactly the same fields and constraints as creating.
+export const updateEntrySchema = createEntrySchema satisfies z.ZodType<UpdateEntryInput>;
+
 export const createEntryResponseSchema = z.object({
   id: z.string(),
   status: z.literal("published"),
 }) satisfies z.ZodType<CreateEntryResponse>;
+
+export const updateEntryResponseSchema = z.object({
+  id: z.string(),
+  status: z.string(),
+}) satisfies z.ZodType<UpdateEntryResponse>;
+
+export const deleteEntryResponseSchema = z.object({
+  id: z.string(),
+  deletedAt: z.string(),
+}) satisfies z.ZodType<DeleteEntryResponse>;
+
+export const restoreEntryResponseSchema = z.object({
+  id: z.string(),
+  status: z.string(),
+}) satisfies z.ZodType<RestoreEntryResponse>;
+
+export const uploadEntryMediaResponseSchema = z.object({
+  media: mediaPreviewSchema,
+}) satisfies z.ZodType<UploadEntryMediaResponse>;
+
+export const removeEntryMediaResponseSchema = z.object({
+  removed: z.literal(true),
+}) satisfies z.ZodType<RemoveEntryMediaResponse>;
 
 export const startAppleJournalImportResponseSchema = z.object({
   id: z.string(),

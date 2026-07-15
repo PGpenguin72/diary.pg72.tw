@@ -1,32 +1,43 @@
 import { Hono } from "hono";
 import { z } from "zod";
 import type {
-  CreateEntryInput,
   CreateEntryResponse,
+  DeleteEntryResponse,
   EntryBlock,
   EntryDetail,
   LayoutPreset,
   MediaPreview,
-  MediaType,
+  RemoveEntryMediaResponse,
+  RestoreEntryResponse,
   TimelineEntry,
   TimelineResponse,
+  UpdateEntryResponse,
+  UploadEntryMediaResponse,
 } from "../../shared/api";
+import { createEntrySchema, updateEntrySchema } from "../../shared/schemas";
+import { buildExcerpt, countWords } from "../lib/entry-content";
 import { apiError, noStore } from "../lib/http";
+import {
+  type EntryMediaRow,
+  mediaPreviewFromRow,
+  mediaR2Key,
+  parseMediaUpload,
+  uploadMediaObject,
+} from "../lib/media";
 
 const timelineQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(30).default(12),
   before: z.iso.datetime().optional(),
 });
 
-const createEntrySchema = z.object({
-  title: z.string().trim().min(1).max(180),
-  body: z.string().trim().min(1).max(100_000),
-  occurredAt: z.iso.datetime(),
-  timezone: z.string().trim().min(1).max(80),
-  localDate: z.iso.date(),
-  location: z.string().trim().max(180).nullable(),
-  mood: z.string().trim().max(40).nullable(),
-}) satisfies z.ZodType<CreateEntryInput>;
+// Same file-name/type/placement/caption query contract as the Apple Journal
+// media route; position is computed server-side by appending to the entry.
+const entryMediaQuerySchema = z.object({
+  sourcePath: z.string().trim().min(1).max(1_000),
+  type: z.enum(["photo", "video", "audio", "drawing"]),
+  placement: z.enum(["inline", "grid", "cover"]).default("grid"),
+  caption: z.string().max(500).default(""),
+});
 
 interface EntryRow {
   id: string;
@@ -45,20 +56,6 @@ interface EntryRow {
   journal_color: string;
 }
 
-interface MediaRow {
-  id: string;
-  entry_id: string;
-  type: MediaType;
-  r2_key: string;
-  storage_kind: "private_r2" | "demo_asset";
-  width: number | null;
-  height: number | null;
-  duration_ms: number | null;
-  alt_text: string;
-  caption: string;
-  placement: "inline" | "grid" | "cover";
-}
-
 interface TagRow {
   entry_id: string;
   name: string;
@@ -74,28 +71,9 @@ interface BlockRow {
 
 export const entryRoutes = new Hono<{ Bindings: Env }>();
 
-function countWords(text: string): number {
-  const segmenter = new Intl.Segmenter("zh-Hant", { granularity: "word" });
-  let count = 0;
-
-  for (const segment of segmenter.segment(text)) {
-    if (segment.isWordLike) {
-      count += 1;
-    }
-  }
-
-  return count;
-}
-
-function mediaSource(media: MediaRow): string {
-  return media.storage_kind === "demo_asset"
-    ? `/${media.r2_key}`
-    : `/api/media/${media.id}`;
-}
-
 function buildEntries(
   rows: EntryRow[],
-  mediaRows: MediaRow[],
+  mediaRows: EntryMediaRow[],
   tagRows: TagRow[],
 ): TimelineEntry[] {
   const mediaByEntry = new Map<string, MediaPreview[]>();
@@ -103,17 +81,7 @@ function buildEntries(
 
   for (const media of mediaRows) {
     const current = mediaByEntry.get(media.entry_id) ?? [];
-    current.push({
-      id: media.id,
-      type: media.type,
-      src: mediaSource(media),
-      width: media.width,
-      height: media.height,
-      durationMs: media.duration_ms,
-      alt: media.alt_text,
-      caption: media.caption,
-      placement: media.placement,
-    });
+    current.push(mediaPreviewFromRow(media));
     mediaByEntry.set(media.entry_id, current);
   }
 
@@ -145,7 +113,7 @@ function buildEntries(
 async function loadRelations(
   database: D1Database,
   entryIds: string[],
-): Promise<{ media: MediaRow[]; tags: TagRow[] }> {
+): Promise<{ media: EntryMediaRow[]; tags: TagRow[] }> {
   if (entryIds.length === 0) {
     return { media: [], tags: [] };
   }
@@ -164,7 +132,7 @@ async function loadRelations(
         ORDER BY entry_media.entry_id, entry_media.position
       `)
       .bind(...entryIds)
-      .all<MediaRow>(),
+      .all<EntryMediaRow>(),
     database
       .prepare(`
         SELECT entry_tags.entry_id, tags.name
@@ -246,7 +214,7 @@ entryRoutes.post("/entries", async (context) => {
   const blockId = crypto.randomUUID();
   const now = new Date().toISOString();
   const wordCount = countWords(`${input.title} ${input.body}`);
-  const excerpt = input.body.replace(/\s+/g, " ").slice(0, 180);
+  const excerpt = buildExcerpt(input.body);
 
   await context.env.DB.batch([
     context.env.DB.prepare(`
@@ -338,6 +306,338 @@ entryRoutes.get("/entries/:entryId", async (context) => {
     timezone: row.timezone,
   };
 
+  noStore(context);
+  return context.json(response);
+});
+
+entryRoutes.patch("/entries/:entryId", async (context) => {
+  const contentLength = Number(context.req.header("Content-Length") ?? 0);
+  if (Number.isFinite(contentLength) && contentLength > 120_000) {
+    return apiError(context, 413, "ENTRY_TOO_LARGE", "這篇日記超過目前可接受的大小。" );
+  }
+
+  let payload: unknown;
+  try {
+    payload = await context.req.json();
+  } catch {
+    return apiError(context, 400, "INVALID_JSON", "日記內容格式不正確。" );
+  }
+
+  const parsed = updateEntrySchema.safeParse(payload);
+  if (!parsed.success) {
+    return apiError(context, 400, "INVALID_ENTRY", "請檢查標題、日期與日記內容。" );
+  }
+
+  const entryId = context.req.param("entryId");
+  const existing = await context.env.DB.prepare(`
+    SELECT id, status FROM entries WHERE id = ?1 AND deleted_at IS NULL
+  `)
+    .bind(entryId)
+    .first<{ id: string; status: string }>();
+
+  if (!existing) {
+    return apiError(context, 404, "ENTRY_NOT_FOUND", "找不到這篇日記。" );
+  }
+
+  const input = parsed.data;
+  const blockId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const wordCount = countWords(`${input.title} ${input.body}`);
+  const excerpt = buildExcerpt(input.body);
+
+  // Replace every text block with one canonical paragraph — imported entries
+  // collapse to the edited markdown by design — while media links stay put.
+  await context.env.DB.batch([
+    context.env.DB.prepare(`
+      UPDATE entries SET
+        title = ?2,
+        excerpt = ?3,
+        occurred_at = ?4,
+        timezone = ?5,
+        local_date = ?6,
+        location_name = ?7,
+        mood = ?8,
+        word_count = ?9,
+        updated_at = ?10
+      WHERE id = ?1
+    `).bind(
+      entryId,
+      input.title,
+      excerpt,
+      input.occurredAt,
+      input.timezone,
+      input.localDate,
+      input.location,
+      input.mood,
+      wordCount,
+      now,
+    ),
+    context.env.DB.prepare(`
+      DELETE FROM entry_blocks WHERE entry_id = ?1 AND type != 'media'
+    `).bind(entryId),
+    context.env.DB.prepare(`
+      INSERT INTO entry_blocks (
+        id, entry_id, position, type, text_content, attrs_json, created_at, updated_at
+      ) VALUES (?1, ?2, 0, 'paragraph', ?3, '{}', ?4, ?4)
+    `).bind(blockId, entryId, input.body, now),
+    context.env.DB.prepare(`DELETE FROM entry_search WHERE entry_id = ?1`).bind(entryId),
+    context.env.DB.prepare(`
+      INSERT INTO entry_search (entry_id, title, body) VALUES (?1, ?2, ?3)
+    `).bind(entryId, input.title, input.body),
+  ]);
+
+  const response: UpdateEntryResponse = { id: entryId, status: existing.status };
+  noStore(context);
+  return context.json(response);
+});
+
+entryRoutes.delete("/entries/:entryId", async (context) => {
+  const entryId = context.req.param("entryId");
+  const existing = await context.env.DB.prepare(`
+    SELECT id, deleted_at FROM entries WHERE id = ?1
+  `)
+    .bind(entryId)
+    .first<{ id: string; deleted_at: string | null }>();
+
+  if (!existing) {
+    return apiError(context, 404, "ENTRY_NOT_FOUND", "找不到這篇日記。" );
+  }
+
+  // Idempotent: deleting an already soft-deleted entry reports the same state.
+  if (existing.deleted_at) {
+    const response: DeleteEntryResponse = { id: entryId, deletedAt: existing.deleted_at };
+    noStore(context);
+    return context.json(response);
+  }
+
+  const now = new Date().toISOString();
+  await context.env.DB.batch([
+    context.env.DB.prepare(`
+      UPDATE entries SET deleted_at = ?2, updated_at = ?2 WHERE id = ?1
+    `).bind(entryId, now),
+    context.env.DB.prepare(`DELETE FROM entry_search WHERE entry_id = ?1`).bind(entryId),
+  ]);
+
+  const response: DeleteEntryResponse = { id: entryId, deletedAt: now };
+  noStore(context);
+  return context.json(response);
+});
+
+entryRoutes.post("/entries/:entryId/restore", async (context) => {
+  const entryId = context.req.param("entryId");
+  const existing = await context.env.DB.prepare(`
+    SELECT id, title, status FROM entries WHERE id = ?1
+  `)
+    .bind(entryId)
+    .first<{ id: string; title: string; status: string }>();
+
+  if (!existing) {
+    return apiError(context, 404, "ENTRY_NOT_FOUND", "找不到這篇日記。" );
+  }
+
+  // Rebuild the derived FTS row from the canonical blocks; running this on an
+  // entry that was never deleted is a harmless no-op rebuild (idempotent).
+  const blocksResult = await context.env.DB.prepare(`
+    SELECT text_content
+    FROM entry_blocks
+    WHERE entry_id = ?1 AND text_content IS NOT NULL
+    ORDER BY position
+  `)
+    .bind(entryId)
+    .all<{ text_content: string }>();
+  const body = blocksResult.results.map((block) => block.text_content).join("\n\n");
+  const now = new Date().toISOString();
+
+  await context.env.DB.batch([
+    context.env.DB.prepare(`
+      UPDATE entries SET deleted_at = NULL, updated_at = ?2 WHERE id = ?1
+    `).bind(entryId, now),
+    context.env.DB.prepare(`DELETE FROM entry_search WHERE entry_id = ?1`).bind(entryId),
+    context.env.DB.prepare(`
+      INSERT INTO entry_search (entry_id, title, body) VALUES (?1, ?2, ?3)
+    `).bind(entryId, existing.title, body),
+  ]);
+
+  const response: RestoreEntryResponse = { id: entryId, status: existing.status };
+  noStore(context);
+  return context.json(response);
+});
+
+async function readEntryMediaRow(
+  database: D1Database,
+  entryId: string,
+  mediaId: string,
+): Promise<EntryMediaRow | null> {
+  return database
+    .prepare(`
+      SELECT
+        media.id, entry_media.entry_id, media.type, media.r2_key, media.storage_kind,
+        media.width, media.height, media.duration_ms, media.alt_text,
+        entry_media.caption, entry_media.placement
+      FROM entry_media
+      JOIN media ON media.id = entry_media.media_id
+      WHERE entry_media.entry_id = ?1 AND entry_media.media_id = ?2
+    `)
+    .bind(entryId, mediaId)
+    .first<EntryMediaRow>();
+}
+
+entryRoutes.post("/entries/:entryId/media", async (context) => {
+  const entryId = context.req.param("entryId");
+  const query = entryMediaQuerySchema.safeParse(context.req.query());
+  const upload = parseMediaUpload(context.req);
+
+  if (!query.success || !upload) {
+    return apiError(context, 400, "INVALID_IMPORT_MEDIA", "這個媒體格式不完整。" );
+  }
+
+  const entry = await context.env.DB.prepare(`
+    SELECT id FROM entries WHERE id = ?1 AND deleted_at IS NULL
+  `)
+    .bind(entryId)
+    .first<{ id: string }>();
+
+  if (!entry) {
+    return apiError(context, 404, "ENTRY_NOT_FOUND", "找不到這篇日記。" );
+  }
+
+  const input = query.data;
+  const now = new Date().toISOString();
+  // Appends after the entry's current media; INSERT OR IGNORE keeps re-linking
+  // the same media idempotent.
+  const linkStatement = (mediaId: string) =>
+    context.env.DB.prepare(`
+      INSERT OR IGNORE INTO entry_media (
+        entry_id, media_id, position, placement, caption
+      ) VALUES (
+        ?1, ?2,
+        (SELECT COALESCE(MAX(position) + 1, 0) FROM entry_media WHERE entry_id = ?1),
+        ?3, ?4
+      )
+    `).bind(entryId, mediaId, input.placement, input.caption);
+
+  const existingMedia = await context.env.DB.prepare(`
+    SELECT id, status, r2_key FROM media WHERE sha256 = ?1
+  `)
+    .bind(upload.fingerprint)
+    .first<{ id: string; status: string; r2_key: string }>();
+
+  if (existingMedia) {
+    const alreadyLinked = await context.env.DB.prepare(`
+      SELECT 1 AS linked FROM entry_media WHERE entry_id = ?1 AND media_id = ?2
+    `)
+      .bind(entryId, existingMedia.id)
+      .first<{ linked: number }>();
+
+    const statements: D1PreparedStatement[] = [];
+
+    // A previous failed upload left the row without a usable object: retry the
+    // object write with the fresh bytes before reusing the media row.
+    if (existingMedia.status !== "ready") {
+      try {
+        await context.env.MEDIA.put(existingMedia.r2_key, upload.body, {
+          httpMetadata: { contentType: upload.mimeType },
+        });
+      } catch {
+        return apiError(context, 500, "MEDIA_UPLOAD_FAILED", "媒體上傳失敗，可以稍後再試一次。" );
+      }
+      statements.push(
+        context.env.DB.prepare(`
+          UPDATE media SET status = 'ready', updated_at = ?2 WHERE id = ?1
+        `).bind(existingMedia.id, now),
+      );
+    }
+
+    if (!alreadyLinked) {
+      statements.push(linkStatement(existingMedia.id));
+    }
+
+    if (statements.length > 0) {
+      await context.env.DB.batch(statements);
+    }
+
+    const row = await readEntryMediaRow(context.env.DB, entryId, existingMedia.id);
+    if (!row) {
+      return apiError(context, 500, "MEDIA_UPLOAD_FAILED", "媒體上傳失敗，可以稍後再試一次。" );
+    }
+
+    const response: UploadEntryMediaResponse = { media: mediaPreviewFromRow(row) };
+    noStore(context);
+    return context.json(response, alreadyLinked ? 200 : 201);
+  }
+
+  const mediaId = crypto.randomUUID();
+  const r2Key = mediaR2Key("uploads", mediaId, input.sourcePath);
+  const uploaded = await uploadMediaObject({
+    db: context.env.DB,
+    bucket: context.env.MEDIA,
+    mediaId,
+    r2Key,
+    fingerprint: upload.fingerprint,
+    type: input.type,
+    mimeType: upload.mimeType,
+    sizeBytes: upload.sizeBytes,
+    body: upload.body,
+    now,
+    successStatements: [linkStatement(mediaId)],
+  });
+
+  if (!uploaded) {
+    return apiError(context, 500, "MEDIA_UPLOAD_FAILED", "媒體上傳失敗，可以稍後再試一次。" );
+  }
+
+  const row = await readEntryMediaRow(context.env.DB, entryId, mediaId);
+  if (!row) {
+    return apiError(context, 500, "MEDIA_UPLOAD_FAILED", "媒體上傳失敗，可以稍後再試一次。" );
+  }
+
+  const response: UploadEntryMediaResponse = { media: mediaPreviewFromRow(row) };
+  noStore(context);
+  return context.json(response, 201);
+});
+
+entryRoutes.delete("/entries/:entryId/media/:mediaId", async (context) => {
+  const entryId = context.req.param("entryId");
+  const mediaId = context.req.param("mediaId");
+  const link = await context.env.DB.prepare(`
+    SELECT
+      media.r2_key, media.storage_kind,
+      (SELECT COUNT(*) FROM entry_media WHERE media_id = ?2) AS reference_count
+    FROM entry_media
+    JOIN media ON media.id = entry_media.media_id
+    WHERE entry_media.entry_id = ?1 AND entry_media.media_id = ?2
+  `)
+    .bind(entryId, mediaId)
+    .first<{
+      r2_key: string;
+      storage_kind: "private_r2" | "demo_asset";
+      reference_count: number;
+    }>();
+
+  if (!link) {
+    return apiError(context, 404, "MEDIA_NOT_FOUND", "找不到這個媒體。" );
+  }
+
+  const lastReference = link.reference_count <= 1;
+
+  // Delete the object before the rows: if R2 fails we return 500 with the rows
+  // intact (retryable), whereas the reverse order could orphan the object.
+  // Shared deduplicated media with other references keeps its object and row.
+  if (lastReference && link.storage_kind === "private_r2") {
+    await context.env.MEDIA.delete(link.r2_key);
+  }
+
+  const statements = [
+    context.env.DB.prepare(`
+      DELETE FROM entry_media WHERE entry_id = ?1 AND media_id = ?2
+    `).bind(entryId, mediaId),
+  ];
+  if (lastReference) {
+    statements.push(context.env.DB.prepare(`DELETE FROM media WHERE id = ?1`).bind(mediaId));
+  }
+  await context.env.DB.batch(statements);
+
+  const response: RemoveEntryMediaResponse = { removed: true };
   noStore(context);
   return context.json(response);
 });

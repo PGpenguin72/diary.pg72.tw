@@ -1,26 +1,41 @@
 import { LoaderCircle, X } from "lucide-react";
 import { useState, type FormEvent } from "react";
-import type { CreateEntryInput } from "../../shared/api";
+import type { CreateEntryInput, EntryDetail } from "../../shared/api";
+import { blockMarkdown } from "../lib/entry-markdown";
+import { EntryAttachments } from "./EntryAttachments";
 
 interface NewEntryDialogProps {
+  entry?: EntryDetail | null;
   saving: boolean;
   error: string | null;
   onClose: () => void;
   onSave: (input: CreateEntryInput) => Promise<void>;
+  onMediaChanged?: () => void;
 }
 
-function localDateTimeValue(): string {
-  const now = new Date();
-  const offset = now.getTimezoneOffset() * 60_000;
-  return new Date(now.getTime() - offset).toISOString().slice(0, 16);
+const knownMoods = ["calm", "grateful", "focused", "tired", "hopeful"];
+const noop = () => undefined;
+
+function localDateTimeValue(occurredAt?: string): string {
+  const source = occurredAt ? new Date(occurredAt) : new Date();
+  const offset = source.getTimezoneOffset() * 60_000;
+  return new Date(source.getTime() - offset).toISOString().slice(0, 16);
 }
 
-export function NewEntryDialog({ saving, error, onClose, onSave }: NewEntryDialogProps) {
-  const [title, setTitle] = useState("");
-  const [body, setBody] = useState("");
-  const [location, setLocation] = useState("");
-  const [mood, setMood] = useState("");
-  const [dateTime, setDateTime] = useState(localDateTimeValue);
+function entryBodyMarkdown(entry: EntryDetail): string {
+  return entry.blocks
+    .map((block) => blockMarkdown(block))
+    .filter((text) => text.length > 0)
+    .join("\n\n");
+}
+
+export function NewEntryDialog({ entry, saving, error, onClose, onSave, onMediaChanged }: NewEntryDialogProps) {
+  const editing = Boolean(entry);
+  const [title, setTitle] = useState(entry?.title ?? "");
+  const [body, setBody] = useState(() => (entry ? entryBodyMarkdown(entry) : ""));
+  const [location, setLocation] = useState(entry?.location ?? "");
+  const [mood, setMood] = useState(entry?.mood ?? "");
+  const [dateTime, setDateTime] = useState(() => localDateTimeValue(entry?.occurredAt));
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -30,7 +45,7 @@ export function NewEntryDialog({ saving, error, onClose, onSave }: NewEntryDialo
       title,
       body,
       occurredAt: new Date(dateTime).toISOString(),
-      timezone: "Asia/Taipei",
+      timezone: entry?.timezone ?? "Asia/Taipei",
       localDate,
       location: location.trim() || null,
       mood: mood || null,
@@ -48,8 +63,8 @@ export function NewEntryDialog({ saving, error, onClose, onSave }: NewEntryDialo
       >
         <header className="dialog-header">
           <div>
-            <span>NEW ENTRY</span>
-            <h2 id="compose-title">寫下今天</h2>
+            <span>{editing ? "EDIT ENTRY" : "NEW ENTRY"}</span>
+            <h2 id="compose-title">{editing ? "編輯日記" : "寫下今天"}</h2>
           </div>
           <button className="icon-button" type="button" onClick={onClose} title="關閉">
             <X aria-hidden="true" size={20} />
@@ -95,6 +110,7 @@ export function NewEntryDialog({ saving, error, onClose, onSave }: NewEntryDialo
               <span>心情</span>
               <select value={mood} onChange={(event) => setMood(event.target.value)}>
                 <option value="">未設定</option>
+                {mood && !knownMoods.includes(mood) ? <option value={mood}>{mood}</option> : null}
                 <option value="calm">平靜</option>
                 <option value="grateful">感謝</option>
                 <option value="focused">專注</option>
@@ -114,6 +130,15 @@ export function NewEntryDialog({ saving, error, onClose, onSave }: NewEntryDialo
             />
           </label>
 
+          {entry ? (
+            <EntryAttachments
+              entryId={entry.id}
+              initialMedia={entry.media}
+              disabled={saving}
+              onChanged={onMediaChanged ?? noop}
+            />
+          ) : null}
+
           {error ? <p className="form-error">{error}</p> : null}
 
           <footer className="dialog-actions">
@@ -122,7 +147,7 @@ export function NewEntryDialog({ saving, error, onClose, onSave }: NewEntryDialo
             </button>
             <button className="button button--primary" type="submit" disabled={saving}>
               {saving ? <LoaderCircle aria-hidden="true" className="spin" size={17} /> : null}
-              <span>{saving ? "儲存中" : "完成"}</span>
+              <span>{saving ? "儲存中" : editing ? "儲存變更" : "完成"}</span>
             </button>
           </footer>
         </form>

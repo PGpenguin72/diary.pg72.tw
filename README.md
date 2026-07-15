@@ -12,7 +12,7 @@
 - D1 migration：journals、entries、blocks、media、tags、imports、FTS5 與必要索引
 - Overview API、timeline API、entry detail API 與 private R2 streaming route
 - Overview、動態時間軸、日曆、Places、Insights、搜尋與 entry 閱讀視窗
-- 本機可用的文字日記新增流程
+- 文字日記的新增、編輯、刪除（soft delete 可復原）與附件上傳/移除管理
 - Apple Journal HTML ZIP 解析、內容預覽、逐篇 D1 upsert、媒體 R2 上傳與重複匯入去重
 - 空白 seed；合成 Apple Journal fixture 只存在隔離的 E2E state
 - Workers runtime tests、type-aware ESLint、production build 與 Playwright desktop/mobile workflows

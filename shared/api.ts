@@ -92,6 +92,31 @@ export interface CreateEntryResponse {
   status: "published";
 }
 
+export type UpdateEntryInput = CreateEntryInput;
+
+export interface UpdateEntryResponse {
+  id: string;
+  status: string;
+}
+
+export interface DeleteEntryResponse {
+  id: string;
+  deletedAt: string;
+}
+
+export interface RestoreEntryResponse {
+  id: string;
+  status: string;
+}
+
+export interface UploadEntryMediaResponse {
+  media: MediaPreview;
+}
+
+export interface RemoveEntryMediaResponse {
+  removed: true;
+}
+
 export interface StartAppleJournalImportInput {
   fileName: string;
   fileFingerprint: string;

@@ -1,6 +1,7 @@
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { EntryBlock } from "../../shared/api";
+import { blockMarkdown } from "../lib/entry-markdown";
 
 const markdownComponents: Components = {
   a({ children, ...props }) {
@@ -11,23 +12,6 @@ const markdownComponents: Components = {
     );
   },
 };
-
-function blockMarkdown(block: EntryBlock): string {
-  const text = block.text?.trim() ?? "";
-  if (!text) return "";
-
-  if (block.type === "quote" && !text.startsWith(">")) {
-    return text.split("\n").map((line) => `> ${line}`).join("\n");
-  }
-  if (block.type === "list" && !/^\s*(?:[-*+] |\d+\. )/m.test(text)) {
-    return text.split("\n").map((line) => `- ${line}`).join("\n");
-  }
-  if (block.type === "heading" && !/^#{1,6}\s/.test(text)) {
-    return `## ${text}`;
-  }
-
-  return text;
-}
 
 export function EntryMarkdown({ blocks }: { blocks: EntryBlock[] }) {
   return (

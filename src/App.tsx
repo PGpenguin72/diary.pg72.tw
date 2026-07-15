@@ -1,4 +1,4 @@
-import { AlertCircle, LoaderCircle } from "lucide-react";
+import { AlertCircle, LoaderCircle, X } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import type { EntryDetail, OverviewResponse, SessionResponse, TimelineEntry } from "../shared/api";
 import { AppShell, type AppView } from "./components/AppShell";
@@ -14,11 +14,14 @@ import {
 import {
   ApiRequestError,
   createEntry,
+  deleteEntry,
   getEntry,
   getOverview,
   getSession,
   getTimeline,
   logout,
+  restoreEntry,
+  updateEntry,
 } from "./lib/api";
 import { clearAuthErrorParams, readAuthErrorNotice } from "./lib/auth-notice";
 
@@ -64,8 +67,12 @@ export default function App() {
   const [entryLoading, setEntryLoading] = useState(false);
   const [showImport, setShowImport] = useState(false);
   const [showComposer, setShowComposer] = useState(false);
+  const [editingEntry, setEditingEntry] = useState<EntryDetail | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [undoNotice, setUndoNotice] = useState<{ id: string; title: string } | null>(null);
+  const [restoring, setRestoring] = useState(false);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
   const [session, setSession] = useState<SessionResponse | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
   const [authNotice, setAuthNotice] = useState(readAuthErrorNotice);
@@ -86,6 +93,15 @@ export default function App() {
       setLoadError(error instanceof Error ? error.message : "暫時無法讀取日記。" );
     } finally {
       setLoading(false);
+    }
+  }, []);
+
+  // Background refresh without blanking the current view (used by media updates).
+  const refreshData = useCallback(async () => {
+    try {
+      setData(await fetchAppData());
+    } catch {
+      // Keep the data already on screen when a silent refresh fails.
     }
   }, []);
 
@@ -153,8 +169,22 @@ export default function App() {
     setSaveError(null);
 
     try {
-      await createEntry(input);
-      setShowComposer(false);
+      if (editingEntry) {
+        await updateEntry(editingEntry.id, input);
+        setEditingEntry(null);
+
+        if (selectedEntry && selectedEntry.id === editingEntry.id) {
+          try {
+            setSelectedEntry(await getEntry(editingEntry.id));
+          } catch {
+            // The open detail keeps its previous content if the refetch fails.
+          }
+        }
+      } else {
+        await createEntry(input);
+        setShowComposer(false);
+      }
+
       await loadData();
     } catch (error) {
       if (isUnauthorized(error)) {
@@ -169,6 +199,42 @@ export default function App() {
     }
   }
 
+  async function handleDeleteEntry(entry: EntryDetail) {
+    // Errors propagate to the detail dialog, which owns the confirm UI.
+    await deleteEntry(entry.id);
+    setSelectedEntry(null);
+    setEntryLoading(false);
+    setEditingEntry(null);
+    setUndoNotice({ id: entry.id, title: entry.title });
+    setRestoreError(null);
+    await loadData();
+  }
+
+  async function handleRestoreEntry() {
+    if (!undoNotice) return;
+    setRestoring(true);
+    setRestoreError(null);
+
+    try {
+      await restoreEntry(undoNotice.id);
+      setUndoNotice(null);
+      await loadData();
+    } catch (error) {
+      setRestoreError(error instanceof Error ? error.message : "暫時無法復原這篇日記。" );
+    } finally {
+      setRestoring(false);
+    }
+  }
+
+  const selectedEntryId = selectedEntry?.id ?? null;
+  const handleMediaChanged = useCallback(() => {
+    void refreshData();
+
+    if (selectedEntryId) {
+      getEntry(selectedEntryId).then(setSelectedEntry).catch(() => undefined);
+    }
+  }, [refreshData, selectedEntryId]);
+
   async function handleLogout() {
     setLoggingOut(true);
 
@@ -182,6 +248,7 @@ export default function App() {
   }
 
   const header = viewTitles[activeView];
+  const canWrite = session ? session.canWrite : true;
 
   return (
     <AppShell activeView={activeView} onChangeView={setActiveView}>
@@ -189,7 +256,7 @@ export default function App() {
         eyebrow={header.eyebrow}
         title={header.title}
         searchQuery={searchQuery}
-        canWrite={session ? session.canWrite : true}
+        canWrite={canWrite}
         showLogin={session ? !session.authenticated && !session.localBypass : false}
         showLogout={session ? session.authenticated && !session.localBypass : false}
         loggingOut={loggingOut}
@@ -219,6 +286,37 @@ export default function App() {
             >
               知道了
             </button>
+          </div>
+        ) : null}
+
+        {undoNotice ? (
+          <div className="undo-banner" role="status">
+            <p>已刪除「{undoNotice.title}」。</p>
+            {restoreError ? <span className="undo-banner__error">{restoreError}</span> : null}
+            <div className="undo-banner__actions">
+              <button
+                className="button button--secondary button--compact"
+                type="button"
+                disabled={restoring}
+                onClick={() => void handleRestoreEntry()}
+              >
+                {restoring ? <LoaderCircle aria-hidden="true" className="spin" size={13} /> : null}
+                {restoring ? "復原中" : "復原"}
+              </button>
+              <button
+                className="icon-button icon-button--compact"
+                type="button"
+                title="關閉提示"
+                disabled={restoring}
+                onClick={() => {
+                  setUndoNotice(null);
+                  setRestoreError(null);
+                }}
+              >
+                <X aria-hidden="true" size={14} />
+                <span className="sr-only">關閉提示</span>
+              </button>
+            </div>
           </div>
         ) : null}
 
@@ -277,20 +375,32 @@ export default function App() {
           <EntryDetailDialog
             entry={selectedEntry}
             loading={entryLoading}
+            canWrite={canWrite}
             onClose={() => {
               setSelectedEntry(null);
               setEntryLoading(false);
             }}
+            onEdit={(entry) => {
+              setSaveError(null);
+              setEditingEntry(entry);
+            }}
+            onDelete={handleDeleteEntry}
           />
         </Suspense>
       ) : null}
 
-      {showComposer ? (
+      {showComposer || editingEntry ? (
         <NewEntryDialog
+          key={editingEntry?.id ?? "new"}
+          entry={editingEntry}
           saving={saving}
           error={saveError}
-          onClose={() => setShowComposer(false)}
+          onClose={() => {
+            setShowComposer(false);
+            setEditingEntry(null);
+          }}
           onSave={saveEntry}
+          onMediaChanged={handleMediaChanged}
         />
       ) : null}
 

@@ -1,4 +1,4 @@
-import { Clock3, Heart, LoaderCircle, MapPin, X } from "lucide-react";
+import { Clock3, Heart, LoaderCircle, MapPin, Pencil, Trash2, X } from "lucide-react";
 import { useCallback, useState } from "react";
 import type { EntryDetail } from "../../shared/api";
 import { formatEntryDate, formatEntryTime, formatNumber } from "../lib/format";
@@ -10,11 +10,38 @@ import { MediaLightbox } from "./MediaLightbox";
 interface EntryDetailDialogProps {
   entry: EntryDetail | null;
   loading: boolean;
+  canWrite: boolean;
   onClose: () => void;
+  onEdit: (entry: EntryDetail) => void;
+  onDelete: (entry: EntryDetail) => Promise<void>;
 }
 
-export function EntryDetailDialog({ entry, loading, onClose }: EntryDetailDialogProps) {
+export function EntryDetailDialog({
+  entry,
+  loading,
+  canWrite,
+  onClose,
+  onEdit,
+  onDelete,
+}: EntryDetailDialogProps) {
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  async function handleDelete(target: EntryDetail) {
+    setDeleting(true);
+    setDeleteError(null);
+
+    try {
+      // App closes the dialog and reloads the list on success.
+      await onDelete(target);
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : "暫時無法刪除這篇日記。");
+    } finally {
+      setDeleting(false);
+    }
+  }
   const visualMedia = entry?.media.filter((media) => media.type !== "audio") ?? [];
   const audioMedia = entry?.media.filter((media) => media.type === "audio") ?? [];
   const images = visualMedia.filter((media) => media.type === "photo" || media.type === "drawing");
@@ -66,6 +93,60 @@ export function EntryDetailDialog({ entry, loading, onClose }: EntryDetailDialog
                   </span>
                 ) : null}
               </div>
+
+              {canWrite ? (
+                <div className="entry-dialog__actions">
+                  {confirmingDelete ? (
+                    <div className="entry-dialog__confirm" role="group" aria-label="確認刪除">
+                      <span>確定要刪除這篇日記嗎？</span>
+                      <button
+                        className="button button--danger button--compact"
+                        type="button"
+                        disabled={deleting}
+                        onClick={() => void handleDelete(entry)}
+                      >
+                        {deleting ? <LoaderCircle aria-hidden="true" className="spin" size={13} /> : null}
+                        {deleting ? "刪除中" : "確認刪除"}
+                      </button>
+                      <button
+                        className="button button--ghost button--compact"
+                        type="button"
+                        disabled={deleting}
+                        onClick={() => {
+                          setConfirmingDelete(false);
+                          setDeleteError(null);
+                        }}
+                      >
+                        取消
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <button
+                        className="button button--secondary button--compact"
+                        type="button"
+                        onClick={() => onEdit(entry)}
+                      >
+                        <Pencil aria-hidden="true" size={13} />
+                        編輯
+                      </button>
+                      <button
+                        className="button button--ghost button--compact"
+                        type="button"
+                        onClick={() => {
+                          setDeleteError(null);
+                          setConfirmingDelete(true);
+                        }}
+                      >
+                        <Trash2 aria-hidden="true" size={13} />
+                        刪除
+                      </button>
+                    </>
+                  )}
+                </div>
+              ) : null}
+
+              {deleteError ? <p className="form-error">{deleteError}</p> : null}
 
               <EntryMarkdown blocks={entry.blocks} />
 

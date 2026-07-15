@@ -9,7 +9,9 @@ import type {
   StartAppleJournalImportInput,
   StartAppleJournalImportResponse,
 } from "../../shared/api";
+import { buildExcerpt, countWords } from "../lib/entry-content";
 import { apiError, noStore } from "../lib/http";
+import { mediaR2Key, parseMediaUpload, uploadMediaObject } from "../lib/media";
 
 const startImportSchema = z.object({
   fileName: z.string().trim().min(1).max(255),
@@ -44,8 +46,6 @@ const completeImportSchema = z.object({
   failedCount: z.number().int().min(0),
 }) satisfies z.ZodType<CompleteAppleJournalImportInput>;
 
-const MAX_MEDIA_BYTES = 5 * 1024 * 1024 * 1024;
-
 interface ExistingEntryRow {
   id: string;
   source_hash: string | null;
@@ -56,15 +56,6 @@ interface ExistingMediaRow {
 }
 
 export const importRoutes = new Hono<{ Bindings: Env }>();
-
-function countWords(text: string): number {
-  const segmenter = new Intl.Segmenter("zh-Hant", { granularity: "word" });
-  let count = 0;
-  for (const segment of segmenter.segment(text)) {
-    if (segment.isWordLike) count += 1;
-  }
-  return count;
-}
 
 async function sha256(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
@@ -199,7 +190,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
   const now = new Date().toISOString();
   const blockId = crypto.randomUUID();
   const wordCount = countWords(`${input.title} ${input.body}`);
-  const excerpt = input.body.replace(/\s+/g, " ").slice(0, 180);
+  const excerpt = buildExcerpt(input.body);
   const duplicate = existing?.source_hash === sourceHash;
 
   if (duplicate) {
@@ -329,21 +320,9 @@ importRoutes.post("/imports/apple-journal/:importId/entries/:entryId/media", asy
   const importId = context.req.param("importId");
   const entryId = context.req.param("entryId");
   const query = mediaQuerySchema.safeParse(context.req.query());
-  const fingerprint = context.req.header("X-Media-Fingerprint")?.toLowerCase();
-  const contentType = context.req.header("Content-Type")?.split(";", 1)[0]?.trim().toLowerCase();
-  const contentLength = Number(
-    context.req.header("Content-Length") ?? context.req.header("X-Media-Size") ?? 0,
-  );
+  const upload = parseMediaUpload(context.req);
 
-  if (
-    !query.success ||
-    !fingerprint?.match(/^[a-f0-9]{64}$/) ||
-    !contentType ||
-    !Number.isFinite(contentLength) ||
-    contentLength <= 0 ||
-    contentLength > MAX_MEDIA_BYTES ||
-    !context.req.raw.body
-  ) {
+  if (!query.success || !upload) {
     return apiError(context, 400, "INVALID_IMPORT_MEDIA", "這個 Apple Journal 媒體格式不完整。");
   }
 
@@ -360,7 +339,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries/:entryId/media", asy
 
   const input = query.data;
   const existingMedia = await context.env.DB.prepare(`SELECT id FROM media WHERE sha256 = ?1`)
-    .bind(fingerprint)
+    .bind(upload.fingerprint)
     .first<ExistingMediaRow>();
   const now = new Date().toISOString();
 
@@ -376,7 +355,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries/:entryId/media", asy
         importId,
         sourcePath: input.sourcePath,
         sourceId: existingMedia.id,
-        checksum: fingerprint,
+        checksum: upload.fingerprint,
         kind: "media",
         status: "duplicate",
         now,
@@ -392,26 +371,19 @@ importRoutes.post("/imports/apple-journal/:importId/entries/:entryId/media", asy
   }
 
   const mediaId = crypto.randomUUID();
-  const extensionMatch = input.sourcePath.toLowerCase().match(/\.([a-z0-9]{1,8})$/);
-  const r2Key = `imports/${mediaId}${extensionMatch ? `.${extensionMatch[1]}` : ""}`;
-
-  await context.env.DB.prepare(`
-    INSERT INTO media (
-      id, r2_key, storage_kind, sha256, type, mime_type, size_bytes,
-      status, created_at, updated_at
-    ) VALUES (?1, ?2, 'private_r2', ?3, ?4, ?5, ?6, 'uploading', ?7, ?7)
-  `)
-    .bind(mediaId, r2Key, fingerprint, input.type, contentType, contentLength, now)
-    .run();
-
-  try {
-    await context.env.MEDIA.put(r2Key, context.req.raw.body, {
-      httpMetadata: { contentType },
-    });
-    await context.env.DB.batch([
-      context.env.DB.prepare(`
-        UPDATE media SET status = 'ready', updated_at = ?2 WHERE id = ?1
-      `).bind(mediaId, new Date().toISOString()),
+  const r2Key = mediaR2Key("imports", mediaId, input.sourcePath);
+  const uploaded = await uploadMediaObject({
+    db: context.env.DB,
+    bucket: context.env.MEDIA,
+    mediaId,
+    r2Key,
+    fingerprint: upload.fingerprint,
+    type: input.type,
+    mimeType: upload.mimeType,
+    sizeBytes: upload.sizeBytes,
+    body: upload.body,
+    now,
+    successStatements: [
       context.env.DB.prepare(`
         INSERT OR IGNORE INTO entry_media (
           entry_id, media_id, position, placement, caption
@@ -422,29 +394,28 @@ importRoutes.post("/imports/apple-journal/:importId/entries/:entryId/media", asy
         importId,
         sourcePath: input.sourcePath,
         sourceId: mediaId,
-        checksum: fingerprint,
+        checksum: upload.fingerprint,
         kind: "media",
         status: "completed",
         now,
       }),
-    ]);
-  } catch {
-    await context.env.DB.batch([
-      context.env.DB.prepare(`
-        UPDATE media SET status = 'failed', updated_at = ?2 WHERE id = ?1
-      `).bind(mediaId, new Date().toISOString()),
+    ],
+    failureStatements: [
       importItemStatement(context.env.DB, {
         id: crypto.randomUUID(),
         importId,
         sourcePath: input.sourcePath,
         sourceId: mediaId,
-        checksum: fingerprint,
+        checksum: upload.fingerprint,
         kind: "media",
         status: "failed",
         errorCode: "R2_UPLOAD_FAILED",
         now,
       }),
-    ]);
+    ],
+  });
+
+  if (!uploaded) {
     return apiError(context, 500, "MEDIA_UPLOAD_FAILED", "媒體上傳失敗，可以重新匯入後續傳。");
   }
 

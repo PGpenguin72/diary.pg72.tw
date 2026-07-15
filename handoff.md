@@ -161,7 +161,7 @@ Cloudflare CLI 指令執行前先讀 Cloudflare / Wrangler skill 或目前官方
 2. **大型媒體 upload**：目前附件仍經 Worker request body 寫 R2；真實 archive 有約 157.4 MB 單檔，會超過常見 100 MB request body 限制。需要 object-scoped direct upload authorization 與 R2 multipart/resume。
 3. **匯入 reconciliation**：已有基本進度與去重，但完整可下載 error report、部分完成狀態、逐 part retry、checksum reconciliation 和中斷後精確續傳仍需補強。
 4. **Apple schema / codec 相容性**：Apple 未承諾 HTML schema 穩定；HEIC/HEVC/HDR 的跨瀏覽器顯示、縮圖和必要轉碼尚未完整解決。
-5. **編輯工作流**：目前只有基本文字新增；rich block editor、draft/autosave、編輯、刪除/復原、附件線上上傳、位置/標籤管理尚未完成。
+5. **編輯工作流**：已完成 markdown 編輯（`PATCH /api/entries/:id`，imported entry 的多個文字 block 會合併為單一 paragraph）、soft delete + 復原（`DELETE` / `POST .../restore`）、附件上傳與移除（`POST /api/entries/:id/media`、`DELETE .../media/:mediaId`，fingerprint 去重、共用媒體引用計數保護、R2 key prefix `uploads/`）。尚缺：rich block editor、draft/autosave、位置/標籤管理、軟刪除保留期後的最終 R2 清理。
 6. **資料可攜與復原**：完整 export、backup/checkpoint、restore 與 final R2 cleanup 尚未完成。
 7. **規模與查詢**：需要 10,000 entries fixture、query-plan 檢查、完整 pagination / load-more 與更完整的 calendar/places/insights 行為。
 8. **測試覆蓋**：尚缺 production 實地登入邊界驗證、direct/multipart upload、malformed archive、delete recovery、完整 export 與 production smoke tests。

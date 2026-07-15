@@ -3,26 +3,36 @@ import type {
   CompleteAppleJournalImportResponse,
   CreateEntryInput,
   CreateEntryResponse,
+  DeleteEntryResponse,
   EntryDetail,
   ImportAppleJournalEntryInput,
   ImportAppleJournalEntryResponse,
   ImportAppleJournalMediaResponse,
   OverviewResponse,
+  RestoreEntryResponse,
   SessionResponse,
   StartAppleJournalImportInput,
   StartAppleJournalImportResponse,
   TimelineResponse,
+  UpdateEntryInput,
+  UpdateEntryResponse,
+  UploadEntryMediaResponse,
 } from "../../shared/api";
 import {
   completeAppleJournalImportResponseSchema,
   createEntryResponseSchema,
+  deleteEntryResponseSchema,
   entryDetailSchema,
   importAppleJournalEntryResponseSchema,
   importAppleJournalMediaResponseSchema,
   overviewResponseSchema,
+  removeEntryMediaResponseSchema,
+  restoreEntryResponseSchema,
   sessionResponseSchema,
   startAppleJournalImportResponseSchema,
   timelineResponseSchema,
+  updateEntryResponseSchema,
+  uploadEntryMediaResponseSchema,
 } from "../../shared/schemas";
 import type { z } from "zod";
 
@@ -126,6 +136,76 @@ export function createEntry(input: CreateEntryInput): Promise<CreateEntryRespons
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   });
+}
+
+export function updateEntry(entryId: string, input: UpdateEntryInput): Promise<UpdateEntryResponse> {
+  return requestJson(`/api/entries/${encodeURIComponent(entryId)}`, updateEntryResponseSchema, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export function deleteEntry(entryId: string): Promise<DeleteEntryResponse> {
+  return requestJson(`/api/entries/${encodeURIComponent(entryId)}`, deleteEntryResponseSchema, {
+    method: "DELETE",
+  });
+}
+
+export function restoreEntry(entryId: string): Promise<RestoreEntryResponse> {
+  return requestJson(
+    `/api/entries/${encodeURIComponent(entryId)}/restore`,
+    restoreEntryResponseSchema,
+    { method: "POST" },
+  );
+}
+
+function mediaTypeFromMime(mimeType: string): "photo" | "video" | "audio" {
+  if (mimeType.startsWith("video/")) return "video";
+  if (mimeType.startsWith("audio/")) return "audio";
+  return "photo";
+}
+
+async function fileFingerprint(file: File): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", await file.arrayBuffer());
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+export async function uploadEntryMedia(
+  entryId: string,
+  file: File,
+  position = 0,
+): Promise<UploadEntryMediaResponse> {
+  const fingerprint = await fileFingerprint(file);
+  const query = new URLSearchParams({
+    sourcePath: file.name,
+    type: mediaTypeFromMime(file.type),
+    position: String(position),
+    placement: "grid",
+    caption: "",
+  });
+
+  return requestJson(
+    `/api/entries/${encodeURIComponent(entryId)}/media?${query.toString()}`,
+    uploadEntryMediaResponseSchema,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": file.type || "application/octet-stream",
+        "X-Media-Fingerprint": fingerprint,
+        "X-Media-Size": String(file.size),
+      },
+      body: file,
+    },
+  );
+}
+
+export async function removeEntryMedia(entryId: string, mediaId: string): Promise<void> {
+  await requestJson(
+    `/api/entries/${encodeURIComponent(entryId)}/media/${encodeURIComponent(mediaId)}`,
+    removeEntryMediaResponseSchema,
+    { method: "DELETE" },
+  );
 }
 
 export function startAppleJournalImport(

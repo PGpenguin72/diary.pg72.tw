@@ -187,6 +187,80 @@ test("@desktop entry, composer, and import surfaces are usable", async ({ page }
   await expect(repeatedImport.getByText("0 篇已寫入 · 1 篇重複")).toBeVisible();
 });
 
+test("@desktop entries can be edited, get attachments, and survive delete with restore", async ({ page }) => {
+  const originalTitle = "端到端編輯測試";
+  const editedTitle = "端到端編輯測試（已更新）";
+  const editedBody = "已更新的內文，由端到端測試寫入。";
+
+  // Idempotent setup: soft-delete leftovers from earlier runs before starting.
+  async function removeMatchingEntries() {
+    const timelineResponse = await page.request.get("/api/entries?limit=30");
+    expect(timelineResponse.ok()).toBe(true);
+    const timeline = (await timelineResponse.json()) as TimelineResponse;
+    for (const entry of timeline.entries) {
+      if (entry.title !== originalTitle && entry.title !== editedTitle) continue;
+      const removal = await page.request.delete(`/api/entries/${entry.id}`);
+      expect(removal.ok()).toBe(true);
+    }
+  }
+  await removeMatchingEntries();
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "新增日記" }).click();
+  const composeDialog = page.getByRole("dialog", { name: "寫下今天" });
+  await composeDialog.getByLabel("標題").fill(originalTitle);
+  await composeDialog.getByLabel("內容").fill("原始內文，等待被端到端測試編輯。");
+  await composeDialog.getByRole("button", { name: "完成" }).click();
+  await expect(composeDialog).toBeHidden();
+
+  await page.getByPlaceholder("搜尋日記").fill(originalTitle);
+  const createdCard = page.locator(".entry-card").filter({ hasText: originalTitle });
+  await createdCard.locator(".entry-card__open").first().click();
+  const detail = page.getByRole("dialog", { name: originalTitle });
+  await expect(detail).toBeVisible();
+
+  await detail.getByRole("button", { name: "編輯" }).click();
+  const editDialog = page.getByRole("dialog", { name: "編輯日記" });
+  await expect(editDialog.getByLabel("標題")).toHaveValue(originalTitle);
+  await expect(editDialog.getByText("目前沒有附件。")).toBeVisible();
+  await editDialog.getByLabel("標題").fill(editedTitle);
+  await editDialog.getByLabel("內容").fill(editedBody);
+
+  await editDialog.locator('input[type="file"]').setInputFiles({
+    name: "e2e-attachment.png",
+    mimeType: "image/png",
+    buffer: Buffer.from(onePixelPng),
+  });
+  await expect(editDialog.getByText("已上傳 1 / 1 個檔案")).toBeVisible();
+  await expect(editDialog.locator(".compose-attachment__status[data-status='done']")).toBeVisible();
+
+  await editDialog.getByRole("button", { name: "儲存變更" }).click();
+  await expect(editDialog).toBeHidden();
+
+  const updatedDetail = page.getByRole("dialog", { name: editedTitle });
+  await expect(updatedDetail).toBeVisible();
+  await expect(updatedDetail.getByText(editedBody)).toBeVisible();
+  await expect(updatedDetail.locator(".entry-dialog__media-grid img")).toHaveCount(1);
+
+  await updatedDetail.getByRole("button", { name: "刪除", exact: true }).click();
+  await expect(updatedDetail.getByText("確定要刪除這篇日記嗎？")).toBeVisible();
+  await updatedDetail.getByRole("button", { name: "確認刪除" }).click();
+  await expect(updatedDetail).toBeHidden();
+
+  await page.getByPlaceholder("搜尋日記").fill(editedTitle);
+  await expect(page.locator(".entry-card").filter({ hasText: editedTitle })).toHaveCount(0);
+
+  const undoBanner = page.locator(".undo-banner");
+  await expect(undoBanner).toContainText(editedTitle);
+  await undoBanner.getByRole("button", { name: "復原" }).click();
+  await expect(undoBanner).toBeHidden();
+  await expect(page.locator(".entry-card").filter({ hasText: editedTitle })).toHaveCount(1);
+
+  // Leave no visible test entry behind so repeated runs and the masonry
+  // expectations stay stable.
+  await removeMatchingEntries();
+});
+
 test("@desktop timeline cards use ordered masonry columns", async ({ page }, testInfo) => {
   const bodies = [
     "短短記下一件今天發生的事。",
