@@ -39,11 +39,15 @@ export function OverviewView({
               <ArrowUpRight aria-hidden="true" size={16} />
             </button>
           </div>
-          <div className="entry-grid">
-            {entries.slice(0, 5).map((entry) => (
-              <EntryCard entry={entry} key={entry.id} onOpen={onOpenEntry} />
-            ))}
-          </div>
+          {entries.length > 0 ? (
+            <div className="entry-grid">
+              {entries.slice(0, 5).map((entry) => (
+                <EntryCard entry={entry} key={entry.id} onOpen={onOpenEntry} />
+              ))}
+            </div>
+          ) : (
+            <EmptyState title="沒有符合的日記" />
+          )}
         </section>
 
         <aside className="insight-rail">

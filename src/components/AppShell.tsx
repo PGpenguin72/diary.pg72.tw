@@ -71,7 +71,7 @@ export function AppShell({ activeView, children, onChangeView }: AppShellProps) 
           <NotebookTabs aria-hidden="true" size={17} />
           <span>
             <strong>日常</strong>
-            <small>7 篇示範日記</small>
+            <small>私人日記</small>
           </span>
         </div>
       </aside>

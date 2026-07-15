@@ -1,4 +1,5 @@
-import { Clock3, Heart, MapPin } from "lucide-react";
+import { ChevronLeft, ChevronRight, Clock3, Heart, MapPin } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import type { TimelineEntry } from "../../shared/api";
 import { formatEntryDate, formatEntryTime } from "../lib/format";
 import { EntryMedia } from "./EntryMedia";
@@ -9,8 +10,29 @@ interface EntryCardProps {
 }
 
 export function EntryCard({ entry, onOpen }: EntryCardProps) {
-  const cover = entry.media.find((media) => media.type !== "audio");
+  const covers = useMemo(() => {
+    const images = entry.media.filter((media) => media.type === "photo" || media.type === "drawing");
+    return images.length > 0 ? images : entry.media.filter((media) => media.type === "video");
+  }, [entry.media]);
+  const [coverIndex, setCoverIndex] = useState(() =>
+    covers.length > 0 ? Math.abs(entry.layoutSeed) % covers.length : 0,
+  );
+  const cover = covers[coverIndex % Math.max(covers.length, 1)];
   const isWide = entry.layoutPreset === "film" || (entry.layoutPreset === "auto" && Boolean(cover));
+
+  useEffect(() => {
+    if (covers.length <= 1 || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+
+    const interval = window.setInterval(
+      () => setCoverIndex((current) => (current + 1) % covers.length),
+      6_000 + (Math.abs(entry.layoutSeed) % 4) * 700,
+    );
+    return () => window.clearInterval(interval);
+  }, [covers.length, entry.layoutSeed]);
+
+  function rotateCover(direction: -1 | 1) {
+    setCoverIndex((current) => (current + direction + covers.length) % covers.length);
+  }
 
   return (
     <article
@@ -28,8 +50,21 @@ export function EntryCard({ entry, onOpen }: EntryCardProps) {
 
       {cover ? (
         <figure className="entry-card__media">
-          <EntryMedia media={cover} />
+          <div className="entry-card__media-frame" key={cover.id}>
+            <EntryMedia media={cover} />
+          </div>
           {cover.caption ? <figcaption>{cover.caption}</figcaption> : null}
+          {covers.length > 1 ? (
+            <div className="entry-card__cover-controls" aria-label="封面圖片">
+              <button type="button" onClick={() => rotateCover(-1)} title="上一張封面" aria-label="上一張封面">
+                <ChevronLeft aria-hidden="true" size={15} />
+              </button>
+              <span>{coverIndex % covers.length + 1} / {covers.length}</span>
+              <button type="button" onClick={() => rotateCover(1)} title="下一張封面" aria-label="下一張封面">
+                <ChevronRight aria-hidden="true" size={15} />
+              </button>
+            </div>
+          ) : null}
         </figure>
       ) : null}
 

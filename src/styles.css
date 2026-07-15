@@ -620,7 +620,7 @@ img {
   aspect-ratio: 4 / 3;
   margin: 0;
   overflow: hidden;
-  background: #1b2027;
+  background: #06080b;
 }
 
 .entry-card[data-wide="true"] .entry-card__media {
@@ -628,17 +628,59 @@ img {
   aspect-ratio: auto;
 }
 
+.entry-card__media-frame {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  animation: cover-in 420ms ease both;
+}
+
 .entry-card__media img,
 .entry-card__media video {
   width: 100%;
   height: 100%;
-  object-fit: cover;
-  transition: transform 400ms ease;
+  object-fit: contain;
 }
 
-.entry-card:hover .entry-card__media img,
-.entry-card:hover .entry-card__media video {
-  transform: scale(1.018);
+.entry-card__cover-controls {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 4;
+  display: grid;
+  grid-template-columns: 28px auto 28px;
+  align-items: center;
+  color: #f2f4f7;
+  font-size: 9px;
+  font-weight: 700;
+  background: rgba(7, 9, 12, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  backdrop-filter: blur(8px);
+  overflow: hidden;
+}
+
+.entry-card__cover-controls button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.entry-card__cover-controls button:hover {
+  color: var(--forest);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.entry-card__cover-controls span {
+  min-width: 34px;
+  text-align: center;
 }
 
 .entry-card__media figcaption {
@@ -1137,24 +1179,29 @@ img {
 }
 
 .entry-dialog__hero {
+  display: grid;
+  place-items: center;
   width: 100%;
-  max-height: 460px;
-  aspect-ratio: 16 / 9;
   margin: 0;
   overflow: hidden;
-  background: #1b2027;
+  background: #06080b;
 }
 
-.entry-dialog__hero img,
+.entry-dialog__hero img {
+  width: 100%;
+  height: auto;
+}
+
 .entry-dialog__hero video {
   width: 100%;
-  height: 100%;
-  object-fit: cover;
+  height: auto;
+  max-height: 78vh;
+  object-fit: contain;
 }
 
 .entry-dialog__media-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 12px;
   margin-top: 28px;
   padding-top: 18px;
@@ -1173,8 +1220,9 @@ img {
 .entry-dialog__media-grid img,
 .entry-dialog__media-grid video {
   width: 100%;
-  aspect-ratio: 4 / 3;
-  object-fit: cover;
+  height: auto;
+  max-height: 78vh;
+  object-fit: contain;
 }
 
 .entry-dialog__media-grid figure[data-type="audio"] {
@@ -1559,6 +1607,17 @@ img {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes cover-in {
+  from {
+    opacity: 0;
+    transform: scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
   }
 }
 

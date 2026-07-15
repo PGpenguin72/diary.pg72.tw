@@ -14,7 +14,7 @@
 - Overview、動態時間軸、日曆、Places、Insights、搜尋與 entry 閱讀視窗
 - 本機可用的文字日記新增流程
 - Apple Journal HTML ZIP 解析、內容預覽、逐篇 D1 upsert、媒體 R2 上傳與重複匯入去重
-- 合成 seed data 與明確授權的 demo media
+- 空白 seed；合成 Apple Journal fixture 只存在隔離的 E2E state
 - Workers runtime tests、type-aware ESLint、production build 與 Playwright desktop/mobile workflows
 
 目前 remote 寫入預設關閉。只有 `localhost` 可以建立或匯入 entry；正式環境必須先完成 Cloudflare Access JWT 驗證，才可開放任何 mutation。匯入器已支援目前已知的 `Entries/*.html` + `Resources/` 結構，更多 Apple export 變體仍需真實但去識別化的 fixture 驗證。
