@@ -115,7 +115,7 @@ flowchart TB
 需求中的「動態排列」定義為 **masonry + editorial collage**，不是純 Pinterest 亂序：
 
 - 年、月、日仍維持清楚的時間軸與閱讀順序。
-- 卡片依內容自動選版型：純文字、單張主視覺、照片拼貼、影片主視覺、位置記憶、短句等。
+- 卡片依內容自動選版型：純文字、正文下方相簿、位置記憶、短句等；不使用媒體作為卡片封面。
 - 桌面使用 responsive grid；手機以單欄為主，有限度穿插雙欄照片。
 - 版型由內容特徵與持久化的 `layout_seed` 決定，重新整理後不能隨機跳動。
 - 使用者可覆寫自動版型：`Auto`、`Letter`、`Film`、`Contact Sheet`、`Compact`。
@@ -126,7 +126,7 @@ flowchart TB
 
 - rich text：標題、粗體、斜體、底線、刪除線、引言、清單、連結與文字色彩
 - block-based 內容：文字、照片、影片、錄音、繪圖、位置、mood、外部連結
-- 媒體可置於內文中或 attachment grid，並可排序、調整尺寸與設定封面
+- 媒體置於正文後方的 attachment grid，可排序與調整尺寸；單格維持中等尺寸並完整顯示內容
 - 日期、時區與位置可手動修改，支援補寫過去日記
 - 草稿自動儲存、離開提示、衝突偵測
 - 收藏、標籤、journal 分類、搜尋、篩選與排序
@@ -321,7 +321,7 @@ R2 提供 TLS 傳輸加密與 Cloudflare 管理的 AES-256 at-rest encryption，
 
 ### Phase 2：版型與組織深化
 
-- inline media 重排、裁切、封面與進階 rich text
+- inline media 重排、相簿尺寸調整與進階 rich text
 - 動態 editorial layout + 手動 preset
 - 多 journals、Places、On this day
 

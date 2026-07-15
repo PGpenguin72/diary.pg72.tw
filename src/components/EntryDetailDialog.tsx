@@ -10,8 +10,7 @@ interface EntryDetailDialogProps {
 }
 
 export function EntryDetailDialog({ entry, loading, onClose }: EntryDetailDialogProps) {
-  const hero = entry?.media.find((media) => media.type !== "audio");
-  const remainingMedia = entry?.media.filter((media) => media.id !== hero?.id) ?? [];
+  const visualMediaCount = entry?.media.filter((media) => media.type !== "audio").length ?? 0;
 
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
@@ -34,12 +33,6 @@ export function EntryDetailDialog({ entry, loading, onClose }: EntryDetailDialog
           </div>
         ) : (
           <>
-            {hero ? (
-              <figure className="entry-dialog__hero">
-                <EntryMedia media={hero} interactive />
-              </figure>
-            ) : null}
-
             <div className="entry-dialog__content">
               <div className="entry-dialog__date">
                 <span>{formatEntryDate(entry.occurredAt)}</span>
@@ -82,9 +75,13 @@ export function EntryDetailDialog({ entry, loading, onClose }: EntryDetailDialog
                 })}
               </div>
 
-              {remainingMedia.length > 0 ? (
-                <div className="entry-dialog__media-grid" aria-label="日記媒體">
-                  {remainingMedia.map((media) => (
+              {entry.media.length > 0 ? (
+                <div
+                  className="entry-dialog__media-grid"
+                  data-visual-count={visualMediaCount}
+                  aria-label="日記媒體"
+                >
+                  {entry.media.map((media) => (
                     <figure key={media.id} data-type={media.type}>
                       <EntryMedia media={media} interactive />
                       {media.caption && media.type !== "audio" ? <figcaption>{media.caption}</figcaption> : null}
