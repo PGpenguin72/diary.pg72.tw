@@ -8,3 +8,4 @@ allowBuilds:
 
 minimumReleaseAgeExclude:
   - '@cloudflare/workers-types@5.20260715.1'
+  - '@zip.js/zip.js@2.8.30'

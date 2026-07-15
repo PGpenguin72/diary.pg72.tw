@@ -1,14 +1,25 @@
 import type {
+  CompleteAppleJournalImportInput,
+  CompleteAppleJournalImportResponse,
   CreateEntryInput,
   CreateEntryResponse,
   EntryDetail,
+  ImportAppleJournalEntryInput,
+  ImportAppleJournalEntryResponse,
+  ImportAppleJournalMediaResponse,
   OverviewResponse,
+  StartAppleJournalImportInput,
+  StartAppleJournalImportResponse,
   TimelineResponse,
 } from "../../shared/api";
 import {
+  completeAppleJournalImportResponseSchema,
   createEntryResponseSchema,
   entryDetailSchema,
+  importAppleJournalEntryResponseSchema,
+  importAppleJournalMediaResponseSchema,
   overviewResponseSchema,
+  startAppleJournalImportResponseSchema,
   timelineResponseSchema,
 } from "../../shared/schemas";
 import type { z } from "zod";
@@ -87,4 +98,80 @@ export function createEntry(input: CreateEntryInput): Promise<CreateEntryRespons
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   });
+}
+
+export function startAppleJournalImport(
+  input: StartAppleJournalImportInput,
+): Promise<StartAppleJournalImportResponse> {
+  return requestJson("/api/imports/apple-journal", startAppleJournalImportResponseSchema, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+export function importAppleJournalEntry(
+  importId: string,
+  input: ImportAppleJournalEntryInput,
+): Promise<ImportAppleJournalEntryResponse> {
+  return requestJson(
+    `/api/imports/apple-journal/${encodeURIComponent(importId)}/entries`,
+    importAppleJournalEntryResponseSchema,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+}
+
+export function importAppleJournalMedia(
+  importId: string,
+  entryId: string,
+  media: {
+    blob: Blob;
+    fingerprint: string;
+    sourcePath: string;
+    type: "photo" | "video" | "audio" | "drawing";
+    position: number;
+    placement: "inline" | "grid" | "cover";
+    caption: string;
+  },
+): Promise<ImportAppleJournalMediaResponse> {
+  const query = new URLSearchParams({
+    sourcePath: media.sourcePath,
+    type: media.type,
+    position: String(media.position),
+    placement: media.placement,
+    caption: media.caption,
+  });
+
+  return requestJson(
+    `/api/imports/apple-journal/${encodeURIComponent(importId)}/entries/${encodeURIComponent(entryId)}/media?${query.toString()}`,
+    importAppleJournalMediaResponseSchema,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": media.blob.type || "application/octet-stream",
+        "X-Media-Fingerprint": media.fingerprint,
+        "X-Media-Size": String(media.blob.size),
+      },
+      body: media.blob,
+    },
+  );
+}
+
+export function completeAppleJournalImport(
+  importId: string,
+  input: CompleteAppleJournalImportInput,
+): Promise<CompleteAppleJournalImportResponse> {
+  return requestJson(
+    `/api/imports/apple-journal/${encodeURIComponent(importId)}/complete`,
+    completeAppleJournalImportResponseSchema,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
 }

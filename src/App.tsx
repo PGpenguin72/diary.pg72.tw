@@ -1,9 +1,8 @@
 import { AlertCircle, LoaderCircle } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import type { EntryDetail, OverviewResponse, TimelineEntry } from "../shared/api";
 import { AppShell, type AppView } from "./components/AppShell";
 import { EntryDetailDialog } from "./components/EntryDetailDialog";
-import { ImportDialog } from "./components/ImportDialog";
 import { NewEntryDialog } from "./components/NewEntryDialog";
 import { PageHeader } from "./components/PageHeader";
 import {
@@ -14,6 +13,11 @@ import {
   TimelineView,
 } from "./components/Views";
 import { createEntry, getEntry, getOverview, getTimeline } from "./lib/api";
+
+const ImportDialog = lazy(async () => {
+  const module = await import("./components/ImportDialog");
+  return { default: module.ImportDialog };
+});
 
 interface AppData {
   overview: OverviewResponse;
@@ -200,7 +204,23 @@ export default function App() {
         />
       ) : null}
 
-      {showImport ? <ImportDialog onClose={() => setShowImport(false)} /> : null}
+      {showImport ? (
+        <Suspense
+          fallback={(
+            <div className="dialog-backdrop" role="status">
+              <div className="dialog-loading import-loading">
+                <LoaderCircle aria-hidden="true" className="spin" size={28} />
+                <span>準備匯入工具</span>
+              </div>
+            </div>
+          )}
+        >
+          <ImportDialog
+            onClose={() => setShowImport(false)}
+            onImported={loadData}
+          />
+        </Suspense>
+      ) : null}
     </AppShell>
   );
 }

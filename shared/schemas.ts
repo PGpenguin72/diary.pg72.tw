@@ -1,8 +1,12 @@
 import { z } from "zod";
 import type {
+  CompleteAppleJournalImportResponse,
   CreateEntryResponse,
   EntryDetail,
+  ImportAppleJournalEntryResponse,
+  ImportAppleJournalMediaResponse,
   OverviewResponse,
+  StartAppleJournalImportResponse,
   TimelineResponse,
 } from "./api";
 
@@ -86,3 +90,22 @@ export const createEntryResponseSchema = z.object({
   id: z.string(),
   status: z.literal("published"),
 }) satisfies z.ZodType<CreateEntryResponse>;
+
+export const startAppleJournalImportResponseSchema = z.object({
+  id: z.string(),
+  status: z.literal("processing"),
+}) satisfies z.ZodType<StartAppleJournalImportResponse>;
+
+export const importAppleJournalEntryResponseSchema = z.object({
+  id: z.string(),
+  disposition: z.enum(["inserted", "updated", "duplicate"]),
+}) satisfies z.ZodType<ImportAppleJournalEntryResponse>;
+
+export const importAppleJournalMediaResponseSchema = z.object({
+  id: z.string(),
+  disposition: z.enum(["inserted", "duplicate"]),
+}) satisfies z.ZodType<ImportAppleJournalMediaResponse>;
+
+export const completeAppleJournalImportResponseSchema = z.object({
+  status: z.enum(["completed", "completed-with-errors"]),
+}) satisfies z.ZodType<CompleteAppleJournalImportResponse>;

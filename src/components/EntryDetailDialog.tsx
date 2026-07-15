@@ -1,6 +1,7 @@
 import { Clock3, Heart, LoaderCircle, MapPin, X } from "lucide-react";
 import type { EntryDetail } from "../../shared/api";
 import { formatEntryDate, formatEntryTime, formatNumber } from "../lib/format";
+import { EntryMedia } from "./EntryMedia";
 
 interface EntryDetailDialogProps {
   entry: EntryDetail | null;
@@ -9,6 +10,9 @@ interface EntryDetailDialogProps {
 }
 
 export function EntryDetailDialog({ entry, loading, onClose }: EntryDetailDialogProps) {
+  const hero = entry?.media.find((media) => media.type !== "audio");
+  const remainingMedia = entry?.media.filter((media) => media.id !== hero?.id) ?? [];
+
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
       <section
@@ -30,14 +34,9 @@ export function EntryDetailDialog({ entry, loading, onClose }: EntryDetailDialog
           </div>
         ) : (
           <>
-            {entry.media[0] ? (
+            {hero ? (
               <figure className="entry-dialog__hero">
-                <img
-                  src={entry.media[0].src}
-                  alt={entry.media[0].alt}
-                  width={entry.media[0].width ?? 1200}
-                  height={entry.media[0].height ?? 800}
-                />
+                <EntryMedia media={hero} interactive />
               </figure>
             ) : null}
 
@@ -82,6 +81,17 @@ export function EntryDetailDialog({ entry, loading, onClose }: EntryDetailDialog
                   return <p key={block.id}>{block.text}</p>;
                 })}
               </div>
+
+              {remainingMedia.length > 0 ? (
+                <div className="entry-dialog__media-grid" aria-label="日記媒體">
+                  {remainingMedia.map((media) => (
+                    <figure key={media.id} data-type={media.type}>
+                      <EntryMedia media={media} interactive />
+                      {media.caption && media.type !== "audio" ? <figcaption>{media.caption}</figcaption> : null}
+                    </figure>
+                  ))}
+                </div>
+              ) : null}
 
               {entry.tags.length > 0 ? (
                 <footer className="entry-dialog__tags">

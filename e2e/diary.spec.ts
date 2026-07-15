@@ -1,4 +1,63 @@
 import { expect, test } from "@playwright/test";
+import {
+  TextReader,
+  Uint8ArrayReader,
+  Uint8ArrayWriter,
+  ZipWriter,
+} from "@zip.js/zip.js";
+
+const syntheticEntry = `<!doctype html>
+<html><body>
+<p class="p1"><span class="s1"><div class="pageContainer">
+<div class="pageHeader">Sunday, 3 November 2024</div>
+<div class="assetGrid">
+  <div id="PHOTO1" class="gridItem assetType_photo">
+    <img src="../Resources/PHOTO1.png" class="asset_image" />
+  </div>
+  <div id="VIDEO1" class="gridItem assetType_video">
+    <video><source src="../Resources/VIDEO1.mov" /></video>
+  </div>
+  <div id="AUDIO1" class="gridItem assetType_audio">
+    <div class="audioAssetHeader">Voice note</div>
+  </div>
+</div>
+<div class="title">合成的 Apple Journal 日記</div><div class="bodyText"></span></p>
+<p class="p2"><span class="s2">這是一篇只用於匯入測試的合成內容。</span></p>
+<p class="p1"><span class="s1"></div></div></span></p>
+</body></html>`;
+
+const onePixelPng = Uint8Array.from(
+  Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  ),
+);
+
+const syntheticFtypMedia = new Uint8Array([
+  0x00, 0x00, 0x00, 0x0c, 0x66, 0x74, 0x79, 0x70, 0x71, 0x74, 0x20, 0x20,
+]);
+
+async function syntheticAppleJournalZip(): Promise<Buffer> {
+  const output = new Uint8ArrayWriter();
+  const writer = new ZipWriter(output);
+  await writer.add(
+    "AppleJournalEntries/Entries/2024-11-03.html",
+    new TextReader(syntheticEntry),
+  );
+  await writer.add(
+    "AppleJournalEntries/Resources/PHOTO1.png",
+    new Uint8ArrayReader(onePixelPng),
+  );
+  await writer.add(
+    "AppleJournalEntries/Resources/VIDEO1.mov",
+    new Uint8ArrayReader(syntheticFtypMedia),
+  );
+  await writer.add(
+    "AppleJournalEntries/Resources/AUDIO1.m4a",
+    new Uint8ArrayReader(syntheticFtypMedia),
+  );
+  return Buffer.from(await writer.close());
+}
 
 test("overview renders without horizontal overflow", async ({ page }, testInfo) => {
   const pageErrors: string[] = [];
@@ -25,7 +84,7 @@ test("overview renders without horizontal overflow", async ({ page }, testInfo) 
   });
 });
 
-test("@desktop entry, composer, and import surfaces are usable", async ({ page }) => {
+test("@desktop entry, composer, and import surfaces are usable", async ({ page }, testInfo) => {
   await page.goto("/");
   await expect(page.locator(".entry-card").first()).toBeVisible();
 
@@ -44,11 +103,39 @@ test("@desktop entry, composer, and import surfaces are usable", async ({ page }
 
   await page.getByRole("button", { name: "匯入" }).click();
   const importDialog = page.getByRole("dialog", { name: "匯入日記" });
+  const archive = await syntheticAppleJournalZip();
   await importDialog.locator('input[type="file"]').setInputFiles({
     name: "AppleJournalEntries.zip",
     mimeType: "application/zip",
-    buffer: Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0x00, 0x00, 0x00]),
+    buffer: archive,
   });
-  await expect(importDialog.getByText("基本格式檢查完成")).toBeVisible();
-  await expect(importDialog.getByText("尚未寫入日記", { exact: false })).toBeVisible();
+  await expect(importDialog.getByText("1 篇日記可以匯入")).toBeVisible();
+  await expect(importDialog.getByText("3 個媒體", { exact: false })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("import-preview.png") });
+  await importDialog.getByRole("button", { name: "開始匯入" }).click();
+  await expect(importDialog.getByText("匯入完成")).toBeVisible();
+  await expect(importDialog.getByText("1 篇已寫入", { exact: false })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("import-complete.png") });
+  await importDialog.getByRole("button", { name: "完成" }).click();
+
+  await page.getByPlaceholder("搜尋日記").fill("合成的 Apple Journal 日記");
+  await expect(page.getByText("合成的 Apple Journal 日記")).toBeVisible();
+  const importedCard = page.locator(".entry-card").filter({ hasText: "合成的 Apple Journal 日記" });
+  await importedCard.locator(".entry-card__open").click();
+  const importedDetail = page.getByRole("dialog", { name: "合成的 Apple Journal 日記" });
+  await expect(importedDetail.locator("video")).toHaveCount(1);
+  await expect(importedDetail.locator("audio")).toHaveCount(1);
+  await page.screenshot({ path: testInfo.outputPath("imported-media.png") });
+  await importedDetail.getByTitle("關閉").click();
+  await page.getByPlaceholder("搜尋日記").fill("");
+
+  await page.getByRole("button", { name: "匯入" }).click();
+  const repeatedImport = page.getByRole("dialog", { name: "匯入日記" });
+  await repeatedImport.locator('input[type="file"]').setInputFiles({
+    name: "AppleJournalEntries.zip",
+    mimeType: "application/zip",
+    buffer: archive,
+  });
+  await repeatedImport.getByRole("button", { name: "開始匯入" }).click();
+  await expect(repeatedImport.getByText("0 篇已寫入 · 1 篇重複")).toBeVisible();
 });

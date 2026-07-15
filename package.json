@@ -15,14 +15,17 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "pnpm run db:migrate:local && pnpm run db:seed:local && playwright test",
+    "test:e2e": "rm -rf .wrangler/e2e-state && pnpm run db:migrate:e2e && pnpm run db:seed:e2e && playwright test",
     "preview": "vite preview",
     "deploy": "pnpm run build && wrangler deploy",
     "cf-typegen": "wrangler types",
     "db:migrate:local": "wrangler d1 migrations apply diary-pg72-tw-db --local",
-    "db:seed:local": "wrangler d1 execute diary-pg72-tw-db --local --file=seed.sql"
+    "db:seed:local": "wrangler d1 execute diary-pg72-tw-db --local --file=seed.sql",
+    "db:migrate:e2e": "wrangler d1 migrations apply diary-pg72-tw-db --local --persist-to .wrangler/e2e-state",
+    "db:seed:e2e": "wrangler d1 execute diary-pg72-tw-db --local --persist-to .wrangler/e2e-state --file=seed.sql"
   },
   "dependencies": {
+    "@zip.js/zip.js": "2.8.30",
     "hono": "4.12.30",
     "lucide-react": "1.24.0",
     "react": "19.2.7",

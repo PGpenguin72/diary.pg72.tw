@@ -6,7 +6,7 @@ export default defineConfig({
   retries: process.env.CI ? 2 : 0,
   reporter: "list",
   use: {
-    baseURL: "http://127.0.0.1:5173",
+    baseURL: "http://127.0.0.1:5187",
     channel: process.env.CI ? undefined : "chrome",
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
@@ -33,9 +33,9 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "pnpm dev --host 127.0.0.1",
-    url: "http://127.0.0.1:5173/api/health",
-    reuseExistingServer: !process.env.CI,
+    command: "pnpm dev --mode e2e --host 127.0.0.1 --port 5187 --strictPort",
+    url: "http://127.0.0.1:5187/api/health",
+    reuseExistingServer: false,
     timeout: 120_000,
   },
 });

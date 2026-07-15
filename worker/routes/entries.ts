@@ -12,6 +12,7 @@ import type {
   TimelineResponse,
 } from "../../shared/api";
 import { apiError, noStore } from "../lib/http";
+import { hasWriteAccess } from "../lib/write-access";
 
 const timelineQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(30).default(12),
@@ -73,11 +74,6 @@ interface BlockRow {
 }
 
 export const entryRoutes = new Hono<{ Bindings: Env }>();
-
-function hasWriteAccess(requestUrl: string): boolean {
-  const hostname = new URL(requestUrl).hostname;
-  return hostname === "localhost" || hostname === "127.0.0.1";
-}
 
 function countWords(text: string): number {
   const segmenter = new Intl.Segmenter("zh-Hant", { granularity: "word" });
@@ -369,9 +365,11 @@ entryRoutes.get("/media/:mediaId", async (context) => {
     return context.redirect(`/${media.r2_key}`, 302);
   }
 
-  const object = await context.env.MEDIA.get(media.r2_key, {
-    range: context.req.raw.headers,
-  });
+  const rangeHeader = context.req.header("Range");
+  const object = await context.env.MEDIA.get(
+    media.r2_key,
+    rangeHeader ? { range: context.req.raw.headers } : undefined,
+  );
 
   if (!object) {
     return apiError(context, 404, "MEDIA_OBJECT_NOT_FOUND", "媒體檔案不存在。" );
@@ -383,14 +381,14 @@ entryRoutes.get("/media/:mediaId", async (context) => {
   headers.set("Cache-Control", "private, max-age=3600");
   headers.set("X-Content-Type-Options", "nosniff");
 
-  if (object.range) {
+  if (rangeHeader && object.range) {
     const offset = "offset" in object.range ? object.range.offset ?? 0 : 0;
     const length = "length" in object.range ? object.range.length ?? object.size : object.size;
     headers.set("Content-Range", `bytes ${offset}-${offset + length - 1}/${object.size}`);
   }
 
   return new Response(object.body, {
-    status: object.range ? 206 : 200,
+    status: rangeHeader && object.range ? 206 : 200,
     headers,
   });
 });

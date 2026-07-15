@@ -92,6 +92,50 @@ export interface CreateEntryResponse {
   status: "published";
 }
 
+export interface StartAppleJournalImportInput {
+  fileName: string;
+  fileFingerprint: string;
+  entryCount: number;
+  mediaCount: number;
+}
+
+export interface StartAppleJournalImportResponse {
+  id: string;
+  status: "processing";
+}
+
+export interface ImportAppleJournalEntryInput {
+  sourcePath: string;
+  title: string;
+  body: string;
+  occurredAt: string;
+  timezone: string;
+  localDate: string;
+  location: string | null;
+  mood: string | null;
+}
+
+export interface ImportAppleJournalEntryResponse {
+  id: string;
+  disposition: "inserted" | "updated" | "duplicate";
+}
+
+export interface ImportAppleJournalMediaResponse {
+  id: string;
+  disposition: "inserted" | "duplicate";
+}
+
+export interface CompleteAppleJournalImportInput {
+  insertedCount: number;
+  duplicateCount: number;
+  skippedCount: number;
+  failedCount: number;
+}
+
+export interface CompleteAppleJournalImportResponse {
+  status: "completed" | "completed-with-errors";
+}
+
 export interface ApiError {
   error: {
     code: string;

@@ -1,6 +1,7 @@
 import { Clock3, Heart, MapPin } from "lucide-react";
 import type { TimelineEntry } from "../../shared/api";
 import { formatEntryDate, formatEntryTime } from "../lib/format";
+import { EntryMedia } from "./EntryMedia";
 
 interface EntryCardProps {
   entry: TimelineEntry;
@@ -8,7 +9,7 @@ interface EntryCardProps {
 }
 
 export function EntryCard({ entry, onOpen }: EntryCardProps) {
-  const cover = entry.media[0];
+  const cover = entry.media.find((media) => media.type !== "audio");
   const isWide = entry.layoutPreset === "film" || (entry.layoutPreset === "auto" && Boolean(cover));
 
   return (
@@ -27,13 +28,7 @@ export function EntryCard({ entry, onOpen }: EntryCardProps) {
 
       {cover ? (
         <figure className="entry-card__media">
-          <img
-            src={cover.src}
-            alt={cover.alt}
-            width={cover.width ?? 1200}
-            height={cover.height ?? 800}
-            loading="lazy"
-          />
+          <EntryMedia media={cover} />
           {cover.caption ? <figcaption>{cover.caption}</figcaption> : null}
         </figure>
       ) : null}
