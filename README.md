@@ -202,6 +202,7 @@ flowchart TD
 ### 大型匯入的處理策略
 
 - 已實作：ZIP 由瀏覽器使用 zip.js random access 逐項讀取，不將整包送進 Worker 或一次解壓到記憶體。
+- 已實作：忽略 `__MACOSX`、AppleDouble 與 Finder metadata；媒體依 magic signature 正規化 MIME，不信任錯標副檔名。
 - 已實作：每篇 entry 獨立 upsert；媒體逐個解壓並以 request body 串流至 Worker，再寫入 private R2。
 - 已實作：import job 記錄進度；重新選擇同一個 ZIP 會依 central-directory fingerprint、source path 與 canonical content hash 去重。
 - 待實作：大型媒體使用短效 upload authorization 直接上傳 R2，避開 Worker request body 限制。

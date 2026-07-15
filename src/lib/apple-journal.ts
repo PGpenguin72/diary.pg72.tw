@@ -91,6 +91,12 @@ function normalizeArchivePath(path: string): string {
   return parts.filter((part) => part && part !== ".").join("/");
 }
 
+function isPlatformMetadata(path: string): boolean {
+  const parts = path.split("/");
+  const fileName = parts.at(-1) ?? "";
+  return parts[0]?.toLowerCase() === "__macosx" || fileName.startsWith("._") || fileName === ".DS_Store";
+}
+
 function resolveArchivePath(basePath: string, reference: string): string | null {
   const cleanReference = reference.split(/[?#]/, 1)[0]?.replaceAll("\\", "/").trim();
   if (!cleanReference || /^(?:data|https?|file):/i.test(cleanReference)) return null;
@@ -152,11 +158,12 @@ async function openArchive(file: File): Promise<{
         entry.compressedSize > 0 &&
         entry.uncompressedSize / entry.compressedSize > MAX_COMPRESSION_RATIO
       ) {
-        throw new AppleJournalArchiveError(`${path} 的壓縮比例異常。`);
+        throw new AppleJournalArchiveError("ZIP 內有檔案的壓縮比例異常。");
       }
       if (!entry.directory) {
+        if (isPlatformMetadata(path)) continue;
         if (filesByPath.has(path) || lowerPaths.has(path.toLowerCase())) {
-          throw new AppleJournalArchiveError(`ZIP 內有重複且衝突的路徑：${path}`);
+          throw new AppleJournalArchiveError("ZIP 內有重複且衝突的檔案路徑。");
         }
         filesByPath.set(path, entry);
         lowerPaths.add(path.toLowerCase());
@@ -195,40 +202,33 @@ function ascii(bytes: Uint8Array, start: number, length: number): string {
   return String.fromCharCode(...bytes.slice(start, start + length));
 }
 
-async function hasExpectedMediaSignature(blob: Blob, mimeType: string): Promise<boolean> {
-  const bytes = new Uint8Array(await blob.slice(0, 16).arrayBuffer());
+async function detectMediaMimeType(
+  blob: Blob,
+  expectedType: AppleJournalMediaType,
+): Promise<string | null> {
+  const bytes = new Uint8Array(await blob.slice(0, 32).arrayBuffer());
   const starts = (...values: number[]) => values.every((value, index) => bytes[index] === value);
 
-  switch (mimeType) {
-    case "image/jpeg":
-      return starts(0xff, 0xd8, 0xff);
-    case "image/png":
-      return starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a);
-    case "image/gif":
-      return ascii(bytes, 0, 6) === "GIF87a" || ascii(bytes, 0, 6) === "GIF89a";
-    case "image/webp":
-      return ascii(bytes, 0, 4) === "RIFF" && ascii(bytes, 8, 4) === "WEBP";
-    case "image/tiff":
-      return starts(0x49, 0x49, 0x2a, 0x00) || starts(0x4d, 0x4d, 0x00, 0x2a);
-    case "image/heic":
-    case "image/heif":
-      return ascii(bytes, 4, 4) === "ftyp";
-    case "video/quicktime":
-    case "video/mp4":
-    case "video/x-m4v":
-    case "audio/mp4":
-      return ascii(bytes, 4, 4) === "ftyp";
-    case "audio/mpeg":
-      return ascii(bytes, 0, 3) === "ID3" || (bytes[0] === 0xff && (bytes[1] ?? 0) >= 0xe0);
-    case "audio/wav":
-      return ascii(bytes, 0, 4) === "RIFF" && ascii(bytes, 8, 4) === "WAVE";
-    case "audio/x-caf":
-      return ascii(bytes, 0, 4) === "caff";
-    case "audio/aac":
-      return bytes[0] === 0xff && ((bytes[1] ?? 0) & 0xf0) === 0xf0;
-    default:
-      return false;
+  if (starts(0xff, 0xd8, 0xff)) return "image/jpeg";
+  if (starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return "image/png";
+  if (ascii(bytes, 0, 6) === "GIF87a" || ascii(bytes, 0, 6) === "GIF89a") return "image/gif";
+  if (ascii(bytes, 0, 4) === "RIFF" && ascii(bytes, 8, 4) === "WEBP") return "image/webp";
+  if (starts(0x49, 0x49, 0x2a, 0x00) || starts(0x4d, 0x4d, 0x00, 0x2a)) return "image/tiff";
+  if (ascii(bytes, 0, 4) === "RIFF" && ascii(bytes, 8, 4) === "WAVE") return "audio/wav";
+  if (ascii(bytes, 0, 4) === "caff") return "audio/x-caf";
+  if (ascii(bytes, 0, 3) === "ID3" || (bytes[0] === 0xff && (bytes[1] ?? 0) >= 0xe0)) {
+    return expectedType === "audio" ? "audio/mpeg" : null;
   }
+  if (ascii(bytes, 4, 4) === "ftyp") {
+    const brand = ascii(bytes, 8, 4).toLowerCase();
+    if (["heic", "heix", "hevc", "hevx"].includes(brand)) return "image/heic";
+    if (["mif1", "msf1"].includes(brand)) return "image/heif";
+    if (brand === "qt  ") return "video/quicktime";
+    if (expectedType === "audio") return "audio/mp4";
+    if (expectedType === "video") return "video/mp4";
+  }
+
+  return null;
 }
 
 function collectOverlayText(item: Element): string[] {
@@ -341,13 +341,13 @@ async function parseHtmlEntry(
   resourcesById: Map<string, string[]>,
 ): Promise<Omit<ParsedAppleJournalEntry, "media"> & { media: Omit<AppleJournalMedia, "fingerprint">[] }> {
   if (htmlEntry.uncompressedSize > MAX_HTML_ENTRY_BYTES) {
-    throw new AppleJournalArchiveError(`${sourcePath} 的 HTML 大小異常。`);
+    throw new AppleJournalArchiveError("其中一篇日記的 HTML 大小異常。");
   }
   if (
     htmlEntry.compressedSize > 0 &&
     htmlEntry.uncompressedSize / htmlEntry.compressedSize > MAX_COMPRESSION_RATIO
   ) {
-    throw new AppleJournalArchiveError(`${sourcePath} 的壓縮比例異常。`);
+    throw new AppleJournalArchiveError("其中一篇日記的壓縮比例異常。");
   }
 
   const html = await htmlEntry.getData(new TextWriter());
@@ -355,7 +355,7 @@ async function parseHtmlEntry(
   const header = document.querySelector(".pageHeader")?.textContent?.replace(/\s+/g, " ").trim() ?? "";
   const localDate = parseLocalDate(header, sourcePath);
   if (!localDate) {
-    throw new AppleJournalArchiveError(`${sourcePath} 缺少可辨識的日期。`);
+    throw new AppleJournalArchiveError("其中一篇日記缺少可辨識的日期。");
   }
 
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -514,12 +514,13 @@ export async function createAppleJournalMediaReader(file: File): Promise<AppleJo
   return {
     async read(media) {
       const entry = filesByPath.get(media.archivePath) ?? filesByLowerPath.get(media.archivePath.toLowerCase());
-      if (!entry) throw new AppleJournalArchiveError(`找不到媒體 ${media.sourcePath}。`);
+      if (!entry) throw new AppleJournalArchiveError("找不到其中一個日記媒體。");
       const blob = await entry.getData(new BlobWriter(media.mimeType));
-      if (!(await hasExpectedMediaSignature(blob, media.mimeType))) {
-        throw new AppleJournalArchiveError(`${media.sourcePath} 的媒體簽章與副檔名不一致。`);
+      const detectedMimeType = await detectMediaMimeType(blob, media.type);
+      if (!detectedMimeType) {
+        throw new AppleJournalArchiveError("其中一個媒體的簽章與副檔名不一致。");
       }
-      return blob;
+      return blob.type === detectedMimeType ? blob : blob.slice(0, blob.size, detectedMimeType);
     },
     close: () => reader.close(),
   };

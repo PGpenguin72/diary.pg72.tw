@@ -12,7 +12,7 @@ const syntheticEntry = `<!doctype html>
 <div class="pageHeader">Sunday, 3 November 2024</div>
 <div class="assetGrid">
   <div id="PHOTO1" class="gridItem assetType_photo">
-    <img src="../Resources/PHOTO1.png" class="asset_image" />
+    <img src="../Resources/PHOTO1.jpeg" class="asset_image" />
   </div>
   <div id="VIDEO1" class="gridItem assetType_video">
     <video><source src="../Resources/VIDEO1.mov" /></video>
@@ -45,8 +45,12 @@ async function syntheticAppleJournalZip(): Promise<Buffer> {
     new TextReader(syntheticEntry),
   );
   await writer.add(
-    "AppleJournalEntries/Resources/PHOTO1.png",
+    "AppleJournalEntries/Resources/PHOTO1.jpeg",
     new Uint8ArrayReader(onePixelPng),
+  );
+  await writer.add(
+    "__MACOSX/AppleJournalEntries/Entries/._2024-11-03.html",
+    new Uint8ArrayReader(new Uint8Array([0x00, 0x05, 0x16, 0x07])),
   );
   await writer.add(
     "AppleJournalEntries/Resources/VIDEO1.mov",
@@ -125,6 +129,12 @@ test("@desktop entry, composer, and import surfaces are usable", async ({ page }
   const importedDetail = page.getByRole("dialog", { name: "合成的 Apple Journal 日記" });
   await expect(importedDetail.locator("video")).toHaveCount(1);
   await expect(importedDetail.locator("audio")).toHaveCount(1);
+  const importedImageType = await importedDetail.locator("img").first().evaluate(async (element) => {
+    const image = element as HTMLImageElement;
+    const response = await fetch(image.currentSrc);
+    return response.headers.get("Content-Type");
+  });
+  expect(importedImageType).toBe("image/png");
   await page.screenshot({ path: testInfo.outputPath("imported-media.png") });
   await importedDetail.getByTitle("關閉").click();
   await page.getByPlaceholder("搜尋日記").fill("");

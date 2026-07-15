@@ -11,3 +11,4 @@ test-results/
 *.cpuprofile
 .DS_Store
 worker-configuration.d.ts
+/apple journal/
