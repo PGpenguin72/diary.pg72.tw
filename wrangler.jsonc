@@ -17,10 +17,17 @@
     // Owner OIDC `sub` allowlist (opaque PG72 ID user id; not a secret).
     "AUTH_ALLOWED_SUBJECT": "cfa13329-4678-4a11-b5dd-489758e9af1b"
   },
+  "routes": [
+    {
+      "pattern": "diary.pg72.tw",
+      "custom_domain": true
+    }
+  ],
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "diary-pg72-tw-db",
+      "database_id": "96c71107-ff57-4f3c-aa3d-658a98ac3433",
       "migrations_dir": "./migrations"
     }
   ],
