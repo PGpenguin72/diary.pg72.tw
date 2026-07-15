@@ -27,7 +27,7 @@ pnpm build
 
 `pnpm run typecheck` regenerates `worker-configuration.d.ts` with `wrangler types` before TypeScript runs. Do not hand-write the `Env` interface. Browser tests use synthetic local data and must not leave new entries in the persistent local D1 state.
 
-Remote reads and writes require a validated PG72 ID (`sso.pg72.tw`) OIDC session whose `sub` matches the configured owner allowlist. Do not weaken this to a client-provided email, a spoofable header, or a hostname-only production allow rule. The only hostname exemption is the explicit localhost development bypass (`localhost` / `127.0.0.1` / `[::1]`).
+Reads are deliberately public: the owner chose to share the diary read-only. Every remote mutation requires a validated PG72 ID (`sso.pg72.tw`) OIDC session whose `sub` matches the configured owner allowlist. Do not weaken this to a client-provided email, a spoofable header, or a hostname-only production allow rule, and do not silently expand what mutations are possible without the owner session. The only hostname exemption is the explicit localhost development bypass (`localhost` / `127.0.0.1` / `[::1]`).
 
 ## Non-negotiable architecture
 
@@ -45,7 +45,7 @@ Do not move media into D1, the frontend bundle, Pages/Workers static assets, or 
 
 This application handles highly sensitive personal data. Privacy is a correctness requirement, not a later hardening task.
 
-- Protect every app and API route with the chosen authentication boundary. For the single-user MVP, this is PG72 ID (self-hosted OIDC at `sso.pg72.tw`) with an exact owner `sub` allowlist and a server-side RP session in D1.
+- Protect every state-changing app and API route with the chosen authentication boundary. For the single-user MVP, this is PG72 ID (self-hosted OIDC at `sso.pg72.tw`) with an exact owner `sub` allowlist and a server-side RP session in D1. Read routes are public by the owner's explicit decision (a read-only shared diary); revisit this boundary before adding any data the owner has not chosen to share.
 - Validate the OIDC assertion server-side (Authorization Code + PKCE, EdDSA ID token signature against the issuer JWKS, nonce, single-use transaction). Never trust a client-provided email, a bearer value in localStorage, or a hidden UI state as authorization.
 - Keep R2 private. Use an authenticated Worker read or a short-lived, object-scoped presigned URL.
 - Restrict upload authorization by object key, method, MIME type, expected size, expiry, and allowed CORS origin.

@@ -44,7 +44,19 @@ export function clientMetadata(config: AuthConfig): oauth.Client {
   };
 }
 
+/**
+ * client_secret_basic with raw (unencoded) credentials. PG72 ID (Better Auth)
+ * base64-decodes the Basic header without form-url decoding, so the RFC 6749
+ * §2.3.1 percent-encoding applied by oauth.ClientSecretBasic turns
+ * "pg72-diary" into "pg72%2Ddiary" and the IdP rejects it as invalid_client.
+ */
+function clientSecretBasicRaw(clientSecret: string): oauth.ClientAuth {
+  return (_authorizationServer, client, _body, headers) => {
+    headers.set("authorization", `Basic ${btoa(`${client.client_id}:${clientSecret}`)}`);
+  };
+}
+
 /** Confidential client when the secret is configured, public client otherwise. */
 export function clientAuth(config: AuthConfig): oauth.ClientAuth {
-  return config.clientSecret ? oauth.ClientSecretBasic(config.clientSecret) : oauth.None();
+  return config.clientSecret ? clientSecretBasicRaw(config.clientSecret) : oauth.None();
 }

@@ -16,7 +16,7 @@
 - GitHub 目前只有 `CI` workflow，最新 `main` run 已成功：<https://github.com/PGpenguin72/diary.pg72.tw/actions/runs/29409349057>。
 - Cloudflare 遠端 R2 bucket `diary-pg72-tw-media` 已建立且目前為空；遠端 D1 `diary-pg72-tw-db` 和 Worker `diary-pg72-tw` 尚未建立。
 - `diary.pg72.tw` 目前沒有 DNS record，因此沒有 production 網站，也尚未完成 GitHub push 後自動部署。
-- 遠端讀寫已改由 PG72 ID（`sso.pg72.tw`，自建 OIDC IdP）登入保護：Worker server-side 驗證 code + PKCE 與 EdDSA ID token 後建立 D1 session，僅允許 `AUTH_ALLOWED_SUBJECT` 設定的擁有者 `sub`。不得以 hostname、前端狀態、自訂 header 或 email 欄位繞過；唯一豁免是 localhost 開發 bypass。詳見下方「登入與授權」。
+- 隱私模型是「公開唯讀、私人寫入」（使用者 2026-07-16 明確確認）：讀取路由公開，所有 mutation 需 PG72 ID（`sso.pg72.tw`，自建 OIDC IdP）登入——Worker server-side 驗證 code + PKCE 與 EdDSA ID token 後建立 D1 session，僅允許 `AUTH_ALLOWED_SUBJECT` 設定的擁有者 `sub`。不得以 hostname、前端狀態、自訂 header 或 email 欄位繞過；唯一豁免是 localhost 開發 bypass。詳見下方「登入與授權」。
 
 ## 本機私密資料狀態
 
@@ -100,7 +100,7 @@
 - 已註冊兩個 client（seed：`~/sso.pg72.tw/apps/sso/seed/diary-clients.sql`）：
   - `pg72-diary`：production 機密 client，`client_secret_basic` + PKCE，redirect `https://diary.pg72.tw/api/auth/callback`。secret 原文存於 gitignored 的 `~/sso.pg72.tw/apps/sso/.env.diary-client-secret`（部署 production 時 `wrangler secret put AUTH_CLIENT_SECRET`）。
   - `pg72-diary-dev`：本機 public client（PKCE、無 secret），redirect `http://127.0.0.1:5173/api/auth/callback`。
-- Worker 端：`/api/*` guard middleware（`/api/health` 與 `/api/auth/*` 放行；localhost bypass；其他路由需有效 session，subject 不符回 403，非本機 mutation 另檢查 Origin）。auth 路由：`/api/auth/{login,callback,logout,session,backchannel-logout}`。
+- Worker 端：`/api/*` guard middleware（`/api/health` 與 `/api/auth/*` 放行；localhost bypass；**讀取公開**；mutation 需有效 session，subject 不符回 403，並檢查 Origin）。auth 路由：`/api/auth/{login,callback,logout,session,backchannel-logout}`。
 - Session：cookie 只存隨機 token（正式環境 `__Host-diary_session`），D1 `auth_sessions` 存 SHA-256 hash，7 天絕對效期。access/refresh token 不落地。
 - 緊急撤銷 kill switch：`wrangler d1 execute diary-pg72-tw-db --remote --command "DELETE FROM auth_sessions"`。
 - Bootstrap 擁有者 `sub`（2026-07-15 已完成，`AUTH_ALLOWED_SUBJECT` 已填入 wrangler.jsonc）：`.dev.vars` 設 `AUTH_CLIENT_ID=pg72-diary-dev` → `pnpm dev` → 開 `http://127.0.0.1:5173/api/auth/login` 登入 → sub 不符時會以 `/?authError=SUBJECT_NOT_ALLOWED&sub=...` 導回，登入畫面（remote）或首頁警示列（localhost bypass）都會顯示 sub → 填入 `wrangler.jsonc` 的 `AUTH_ALLOWED_SUBJECT`。dev/prod client 的 `subjectType` 都是 `public`，sub 相同。

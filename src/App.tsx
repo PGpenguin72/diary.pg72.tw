@@ -2,7 +2,6 @@ import { AlertCircle, LoaderCircle } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import type { EntryDetail, OverviewResponse, SessionResponse, TimelineEntry } from "../shared/api";
 import { AppShell, type AppView } from "./components/AppShell";
-import { LoginScreen } from "./components/LoginScreen";
 import { NewEntryDialog } from "./components/NewEntryDialog";
 import { PageHeader } from "./components/PageHeader";
 import {
@@ -47,10 +46,6 @@ function isUnauthorized(error: unknown): boolean {
   return error instanceof ApiRequestError && error.status === 401;
 }
 
-function needsLoginScreen(session: SessionResponse): boolean {
-  return !session.authenticated && !session.localBypass;
-}
-
 const viewTitles: Record<AppView, { eyebrow: string; title: string }> = {
   overview: { eyebrow: "WELCOME BACK", title: "回來看看這些日子" },
   timeline: { eyebrow: "TIMELINE", title: "時間留下的順序" },
@@ -72,7 +67,6 @@ export default function App() {
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [session, setSession] = useState<SessionResponse | null>(null);
-  const [needsLogin, setNeedsLogin] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [authNotice, setAuthNotice] = useState(readAuthErrorNotice);
 
@@ -89,11 +83,7 @@ export default function App() {
     try {
       setData(await fetchAppData());
     } catch (error) {
-      if (isUnauthorized(error)) {
-        setNeedsLogin(true);
-      } else {
-        setLoadError(error instanceof Error ? error.message : "暫時無法讀取日記。" );
-      }
+      setLoadError(error instanceof Error ? error.message : "暫時無法讀取日記。" );
     } finally {
       setLoading(false);
     }
@@ -115,16 +105,8 @@ export default function App() {
 
         setSession(sessionResult.value);
 
-        if (needsLoginScreen(sessionResult.value)) {
-          setNeedsLogin(true);
-          setLoading(false);
-          return;
-        }
-
         if (dataResult.status === "fulfilled") {
           setData(dataResult.value);
-        } else if (isUnauthorized(dataResult.reason)) {
-          setNeedsLogin(true);
         } else {
           const reason: unknown = dataResult.reason;
           setLoadError(reason instanceof Error ? reason.message : "暫時無法讀取日記。" );
@@ -158,11 +140,7 @@ export default function App() {
     try {
       setSelectedEntry(await getEntry(entryId));
     } catch (error) {
-      if (isUnauthorized(error)) {
-        setNeedsLogin(true);
-      } else {
-        setLoadError(error instanceof Error ? error.message : "暫時無法讀取這篇日記。" );
-      }
+      setLoadError(error instanceof Error ? error.message : "暫時無法讀取這篇日記。" );
       setEntryLoading(false);
       return;
     }
@@ -180,7 +158,9 @@ export default function App() {
       await loadData();
     } catch (error) {
       if (isUnauthorized(error)) {
-        setNeedsLogin(true);
+        // Session expired mid-edit: writing needs a fresh login.
+        setSaveError("登入已過期，請重新登入後再儲存。");
+        setSession((current) => (current ? { ...current, authenticated: false, canWrite: current.localBypass } : current));
       } else {
         setSaveError(error instanceof Error ? error.message : "暫時無法儲存這篇日記。" );
       }
@@ -203,10 +183,6 @@ export default function App() {
 
   const header = viewTitles[activeView];
 
-  if (needsLogin) {
-    return <LoginScreen notice={authNotice} />;
-  }
-
   return (
     <AppShell activeView={activeView} onChangeView={setActiveView}>
       <PageHeader
@@ -214,6 +190,7 @@ export default function App() {
         title={header.title}
         searchQuery={searchQuery}
         canWrite={session ? session.canWrite : true}
+        showLogin={session ? !session.authenticated && !session.localBypass : false}
         showLogout={session ? session.authenticated && !session.localBypass : false}
         loggingOut={loggingOut}
         onChangeSearch={setSearchQuery}
@@ -222,6 +199,7 @@ export default function App() {
           setSaveError(null);
           setShowComposer(true);
         }}
+        onLogin={() => window.location.assign("/api/auth/login")}
         onLogout={() => void handleLogout()}
       />
 

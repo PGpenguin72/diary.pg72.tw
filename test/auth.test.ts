@@ -103,28 +103,43 @@ async function expectErrorCode(response: Response, status: number, code: string)
 }
 
 describe("session cookie guard", () => {
-  it("allows remote reads with a valid session cookie", async () => {
+  it("keeps remote reads public with or without a session cookie", async () => {
+    const anonymous = await remoteRequest("/api/entries");
+    expect(anonymous.status).toBe(200);
+
     const token = await insertSession();
-    const response = await remoteRequest("/api/entries", {
+    const withSession = await remoteRequest("/api/entries", {
       headers: { Cookie: `${SESSION_COOKIE}=${token}` },
     });
-    expect(response.status).toBe(200);
+    expect(withSession.status).toBe(200);
   });
 
-  it("rejects an expired session with 401", async () => {
+  it("rejects a remote mutation with an expired session with 401", async () => {
     const token = await insertSession({
       expiresAt: new Date(Date.now() - 1000).toISOString(),
     });
     const response = await remoteRequest("/api/entries", {
-      headers: { Cookie: `${SESSION_COOKIE}=${token}` },
+      method: "POST",
+      headers: {
+        Cookie: `${SESSION_COOKIE}=${token}`,
+        Origin: REMOTE_ORIGIN,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
     });
     await expectErrorCode(response, 401, "AUTH_REQUIRED");
   });
 
-  it("rejects a session for a different subject with 403", async () => {
+  it("rejects a remote mutation for a different subject with 403", async () => {
     const token = await insertSession({ subject: "someone-else-9999" });
     const response = await remoteRequest("/api/entries", {
-      headers: { Cookie: `${SESSION_COOKIE}=${token}` },
+      method: "POST",
+      headers: {
+        Cookie: `${SESSION_COOKIE}=${token}`,
+        Origin: REMOTE_ORIGIN,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
     });
     await expectErrorCode(response, 403, "SUBJECT_NOT_ALLOWED");
   });
@@ -428,5 +443,32 @@ describe("logout", () => {
     });
     await expectErrorCode(response, 403, "INVALID_ORIGIN");
     expect(await countSessions()).toBe(1);
+  });
+});
+
+describe("confidential client authentication", () => {
+  it("sends raw base64 basic credentials for Better Auth interop", async () => {
+    // PG72 ID decodes the Basic header without form-url decoding, so the
+    // credentials must not be RFC 6749 §2.3.1 percent-encoded ("-" and "_"
+    // would become %2D / %5F and the IdP would reject the client).
+    const { clientAuth } = await import("../worker/lib/auth/oidc");
+    const config = {
+      issuer: new URL(TEST_ISSUER),
+      clientId: TEST_CLIENT_ID,
+      clientSecret: "pg72_cs_raw-secret_value",
+      allowedSubject: TEST_ALLOWED_SUBJECT,
+    };
+
+    const headers = new Headers();
+    await clientAuth(config)(
+      { issuer: TEST_ISSUER },
+      { client_id: TEST_CLIENT_ID },
+      new URLSearchParams(),
+      headers,
+    );
+
+    expect(headers.get("authorization")).toBe(
+      `Basic ${btoa(`${TEST_CLIENT_ID}:pg72_cs_raw-secret_value`)}`,
+    );
   });
 });

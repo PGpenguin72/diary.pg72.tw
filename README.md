@@ -17,7 +17,7 @@
 - 空白 seed；合成 Apple Journal fixture 只存在隔離的 E2E state
 - Workers runtime tests、type-aware ESLint、production build 與 Playwright desktop/mobile workflows
 
-遠端讀寫一律需要 PG72 ID（自建 OIDC SSO，`sso.pg72.tw`）登入：Worker 驗證 Authorization Code + PKCE 流程與 EdDSA ID token 後建立自己的 D1 server-side session，並只允許設定檔中 allowlist 的擁有者 `sub`。`localhost` 開發環境維持免登入 bypass（本機 D1 屬於使用者自己）。匯入器已支援目前已知的 `Entries/*.html` + `Resources/` 結構，更多 Apple export 變體仍需真實但去識別化的 fixture 驗證。
+日記採「公開唯讀、私人寫入」：任何人都能瀏覽日記內容，但所有 mutation（新增、匯入、上傳）需要 PG72 ID（自建 OIDC SSO，`sso.pg72.tw`）登入——Worker 驗證 Authorization Code + PKCE 流程與 EdDSA ID token 後建立自己的 D1 server-side session，並只允許設定檔中 allowlist 的擁有者 `sub`。`localhost` 開發環境維持免登入 bypass（本機 D1 屬於使用者自己）。匯入器已支援目前已知的 `Entries/*.html` + `Resources/` 結構，更多 Apple export 變體仍需真實但去識別化的 fixture 驗證。
 
 ## 本機開發
 
@@ -46,7 +46,7 @@ pnpm build
 1. **日記是資料，不是網站原始碼。** 新增日記不需要 commit、push、build 或 deploy。
 2. **先保住記憶，再追求漂亮。** 匯入必須可重試、可續傳、可核對，不能靜默遺失附件。
 3. **動態排版不能破壞時間順序。** 視覺可以活，但內容順序、可讀性和版面穩定性優先。
-4. **預設完全私密。** 日記與媒體不得放公開 bucket、公開 Git repository 或前端 bundle。
+4. **公開唯讀、私人寫入。** 擁有者決定讓日記內容公開瀏覽，但寫入僅限擁有者本人；媒體 bytes 仍不得放公開 bucket、公開 Git repository 或前端 bundle（一律經 Worker API 供應）。
 5. **可攜性是核心功能。** 系統必須能匯出自己的完整資料，不製造另一個封閉平台。
 
 ## 已決定的架構
@@ -258,7 +258,7 @@ Cloudflare Stream 只有在下列情況再加入：需要自動轉碼、adaptive
 
 ## 隱私與安全模型
 
-- 整個 `diary.pg72.tw` 的 API 由 PG72 ID（`sso.pg72.tw`）OIDC 登入保護，只 allowlist 擁有者的不可變 `sub`；未登入者不得讀取 entry metadata 或媒體。
+- `diary.pg72.tw` 的讀取路由公開（擁有者明確決定分享唯讀日記）；所有 mutation 由 PG72 ID（`sso.pg72.tw`）OIDC 登入保護，只 allowlist 擁有者的不可變 `sub`。加入任何擁有者未選擇公開的資料前，必須重新檢視這個邊界。
 - Worker 在 server-side 完成整個 OIDC 驗證（PKCE、nonce、單次使用 transaction、EdDSA ID token 簽章對 issuer JWKS 驗證），callback 成功後建立自己的 D1 session（cookie 只存隨機 token，D1 只存其 SHA-256）。不信任前端狀態、client 提供的 email 或隱藏入口。
 - Session 為 7 天絕對效期；緊急撤銷可直接清空 session 表：`wrangler d1 execute diary-pg72-tw-db --remote --command "DELETE FROM auth_sessions"`。back-channel logout endpoint 已就緒，待 SSO 端實作遞送。
 - Access token 與 refresh token 不落地；只用 ID token / userinfo 取得身分後即丟棄。
@@ -344,7 +344,7 @@ R2 提供 TLS 傳輸加密與 Cloudflare 管理的 AES-256 at-rest encryption，
 - 文字、照片、影片、錄音、位置與日期能正確呈現；未知欄位可保留供未來 migration。
 - 10,000 篇 entry 的 timeline、calendar、search 與 overview 不做全表無索引掃描。
 - iPhone 與 desktop 上傳時不會將大型檔案完整 buffer 到 app/Worker memory。
-- 未通過 PG72 ID 登入的遠端請求無法取得 entry metadata 或 R2 media。
+- 未通過 PG72 ID 登入的遠端請求無法執行任何 mutation（讀取為擁有者決定的公開唯讀）。
 - 日記正文、附件、位置與 token 不會出現在 application logs。
 - 使用者可以下載一份不依賴本 app 才能解讀的完整匯出。
 

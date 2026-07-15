@@ -76,15 +76,19 @@ describe("diary Worker API", () => {
     expect(response.status).toBe(401);
   });
 
-  it("denies remote reads without a PG72 ID session", async () => {
-    for (const path of ["/api/entries", "/api/overview", "/api/media/x"]) {
+  it("keeps remote reads public without a session", async () => {
+    for (const path of ["/api/entries", "/api/overview"]) {
       const response = await exports.default.fetch(
         new Request(`https://diary.pg72.tw${path}`),
       );
-      expect(response.status, path).toBe(401);
-      const payload = await response.json<{ error: { code: string } }>();
-      expect(payload.error.code, path).toBe("AUTH_REQUIRED");
+      expect(response.status, path).toBe(200);
     }
+
+    // Unknown media is a plain 404, not an auth challenge.
+    const media = await exports.default.fetch(
+      new Request("https://diary.pg72.tw/api/media/x"),
+    );
+    expect(media.status).toBe(404);
   });
 
   it("keeps the health check open on a remote hostname", async () => {

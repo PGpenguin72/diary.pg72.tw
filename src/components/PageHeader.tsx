@@ -1,4 +1,4 @@
-import { LogOut, Plus, Search, Upload, X } from "lucide-react";
+import { LogIn, LogOut, Plus, Search, Upload, X } from "lucide-react";
 import { useId } from "react";
 import { getTodayLabel } from "../lib/format";
 
@@ -7,11 +7,13 @@ interface PageHeaderProps {
   title: string;
   searchQuery: string;
   canWrite: boolean;
+  showLogin: boolean;
   showLogout: boolean;
   loggingOut: boolean;
   onChangeSearch: (query: string) => void;
   onNewEntry: () => void;
   onImport: () => void;
+  onLogin: () => void;
   onLogout: () => void;
 }
 
@@ -20,11 +22,13 @@ export function PageHeader({
   title,
   searchQuery,
   canWrite,
+  showLogin,
   showLogout,
   loggingOut,
   onChangeSearch,
   onNewEntry,
   onImport,
+  onLogin,
   onLogout,
 }: PageHeaderProps) {
   const searchId = useId();
@@ -71,6 +75,13 @@ export function PageHeader({
               <span>新增日記</span>
             </button>
           </>
+        ) : null}
+
+        {showLogin ? (
+          <button className="button button--secondary" type="button" onClick={onLogin}>
+            <LogIn aria-hidden="true" size={17} />
+            <span>登入</span>
+          </button>
         ) : null}
 
         {showLogout ? (

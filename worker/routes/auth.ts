@@ -45,14 +45,24 @@ function remoteJwks(jwksUri: string): ReturnType<typeof createRemoteJWKSet> {
   return jwks;
 }
 
-function logAuthEvent(event: string, error?: unknown): void {
-  // Never log tokens, claims, cookies, or user data here.
-  console.error(
-    JSON.stringify({
-      event,
-      error: error instanceof Error ? error.name : error === undefined ? undefined : "UnknownError",
-    }),
-  );
+function logAuthEvent(event: string, error?: unknown, step?: string): void {
+  // Never log tokens, claims, cookies, or user data here. Standard OAuth
+  // error codes issued by our own IdP are safe diagnostics.
+  const detail: Record<string, unknown> = { event, step };
+  if (error instanceof oauth.ResponseBodyError) {
+    detail.error = error.name;
+    detail.oauthError = error.error;
+    detail.oauthErrorDescription = error.error_description;
+    detail.status = error.status;
+  } else if (error instanceof oauth.WWWAuthenticateChallengeError) {
+    detail.error = error.name;
+    detail.status = error.status;
+  } else if (error instanceof Error) {
+    detail.error = error.name;
+  } else if (error !== undefined) {
+    detail.error = "UnknownError";
+  }
+  console.error(JSON.stringify(detail));
 }
 
 function callbackFailureRedirect(context: Context<{ Bindings: Env }>) {
@@ -168,9 +178,11 @@ authRoutes.get("/auth/callback", async (context) => {
   let centralSid: string | null;
   let displayName: string | null;
   let email: string | null;
+  let step = "discovery";
   try {
     const authorizationServer = await discover(config);
     const client = clientMetadata(config);
+    step = "validate_auth_response";
     const callbackParameters = oauth.validateAuthResponse(
       authorizationServer,
       client,
@@ -178,6 +190,7 @@ authRoutes.get("/auth/callback", async (context) => {
       transaction.state,
     );
 
+    step = "token_exchange";
     const tokenResponse = await oauth.authorizationCodeGrantRequest(
       authorizationServer,
       client,
@@ -187,12 +200,14 @@ authRoutes.get("/auth/callback", async (context) => {
       transaction.code_verifier,
       requestOptions(),
     );
+    step = "process_token_response";
     const tokens = await oauth.processAuthorizationCodeResponse(
       authorizationServer,
       client,
       tokenResponse,
       { expectedNonce: transaction.nonce, requireIdToken: true },
     );
+    step = "validate_id_token_signature";
     await oauth.validateApplicationLevelSignature(
       authorizationServer,
       tokenResponse,
@@ -204,6 +219,7 @@ authRoutes.get("/auth/callback", async (context) => {
       throw new Error("Validated ID token claims were not returned");
     }
 
+    step = "userinfo";
     const userInfoResponse = await oauth.userInfoRequest(
       authorizationServer,
       client,
@@ -223,7 +239,7 @@ authRoutes.get("/auth/callback", async (context) => {
     email = typeof userInfo.email === "string" ? userInfo.email : null;
     // Access and refresh tokens are intentionally not persisted.
   } catch (error) {
-    logAuthEvent("auth_callback_failed", error);
+    logAuthEvent("auth_callback_failed", error, step);
     return callbackFailureRedirect(context);
   }
 

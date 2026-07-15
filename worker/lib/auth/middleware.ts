@@ -6,6 +6,7 @@ import { findSessionByToken } from "./session";
 
 export type AuthState =
   | { mode: "local" }
+  | { mode: "public" }
   | { mode: "session"; subject: string; sid: string | null };
 
 export interface AuthVariables {
@@ -15,9 +16,10 @@ export interface AuthVariables {
 const MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 /**
- * Guards every /api data route. Auth routes and the health check stay open,
- * localhost keeps its explicit dev bypass, everything else requires a valid
- * PG72 ID session bound to the configured owner subject.
+ * Guards /api mutations. Reads are deliberately public — the owner chose to
+ * share the diary read-only — while every state-changing request requires a
+ * valid PG72 ID session bound to the configured owner subject. Auth routes
+ * and the health check stay open, localhost keeps its explicit dev bypass.
  */
 export const authGuard = createMiddleware<{ Bindings: Env; Variables: AuthVariables }>(
   async (context, next) => {
@@ -29,6 +31,12 @@ export const authGuard = createMiddleware<{ Bindings: Env; Variables: AuthVariab
 
     if (isLocalHost(url)) {
       context.set("auth", { mode: "local" });
+      await next();
+      return;
+    }
+
+    if (!MUTATING_METHODS.has(context.req.method)) {
+      context.set("auth", { mode: "public" });
       await next();
       return;
     }
@@ -56,11 +64,9 @@ export const authGuard = createMiddleware<{ Bindings: Env; Variables: AuthVariab
 
     // CSRF second layer (first is SameSite=Lax): remote mutations must come
     // from the site itself.
-    if (MUTATING_METHODS.has(context.req.method)) {
-      const origin = context.req.header("Origin");
-      if (origin !== url.origin) {
-        return apiError(context, 403, "INVALID_ORIGIN", "這個操作必須從日記網站本身發出。");
-      }
+    const origin = context.req.header("Origin");
+    if (origin !== url.origin) {
+      return apiError(context, 403, "INVALID_ORIGIN", "這個操作必須從日記網站本身發出。");
     }
 
     context.set("auth", { mode: "session", subject: session.subject, sid: session.central_sid });
