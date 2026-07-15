@@ -128,10 +128,16 @@ test("@desktop entry, composer, and import surfaces are usable", async ({ page }
   await page.getByPlaceholder("搜尋日記").fill("合成的 Apple Journal 日記");
   await expect(page.getByText("合成的 Apple Journal 日記")).toBeVisible();
   const importedCard = page.locator(".entry-card").filter({ hasText: "合成的 Apple Journal 日記" });
+  const coverFrame = importedCard.locator(".entry-card__media");
+  await expect.poll(() => coverFrame.evaluate((element) => getComputedStyle(element).aspectRatio)).toBe("1 / 1");
+  const firstFrameSize = await coverFrame.boundingBox();
   const firstCoverSource = await importedCard.locator("img").getAttribute("src");
   await importedCard.getByRole("button", { name: "下一張封面" }).click();
   await expect(importedCard.locator("img")).not.toHaveAttribute("src", firstCoverSource ?? "");
   expect(await importedCard.locator("img").evaluate((image) => getComputedStyle(image).objectFit)).toBe("contain");
+  const nextFrameSize = await coverFrame.boundingBox();
+  expect(nextFrameSize?.width).toBeCloseTo(firstFrameSize?.width ?? 0, 0);
+  expect(nextFrameSize?.height).toBeCloseTo(firstFrameSize?.height ?? 0, 0);
   await importedCard.locator(".entry-card__open").click();
   const importedDetail = page.getByRole("dialog", { name: "合成的 Apple Journal 日記" });
   await expect(importedDetail.locator("video")).toHaveCount(1);

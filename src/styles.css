@@ -617,15 +617,16 @@ img {
 
 .entry-card__media {
   position: relative;
-  aspect-ratio: 4 / 3;
+  width: 100%;
+  aspect-ratio: var(--cover-aspect-ratio, 4 / 3);
   margin: 0;
   overflow: hidden;
   background: #06080b;
 }
 
 .entry-card[data-wide="true"] .entry-card__media {
-  min-height: 330px;
-  aspect-ratio: auto;
+  align-self: start;
+  min-height: 0;
 }
 
 .entry-card__media-frame {
@@ -1825,7 +1826,6 @@ img {
 
   .entry-card[data-wide="true"] .entry-card__media {
     min-height: 0;
-    aspect-ratio: 4 / 3;
   }
 
   .entry-card[data-wide="true"] .entry-card__body {

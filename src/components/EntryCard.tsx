@@ -9,14 +9,19 @@ interface EntryCardProps {
   onOpen: (entryId: string) => void;
 }
 
+function mediaAspectRatio(media: TimelineEntry["media"][number] | undefined): number | null {
+  if (!media?.width || !media.height || media.width <= 0 || media.height <= 0) return null;
+  return media.width / media.height;
+}
+
 export function EntryCard({ entry, onOpen }: EntryCardProps) {
   const covers = useMemo(() => {
     const images = entry.media.filter((media) => media.type === "photo" || media.type === "drawing");
     return images.length > 0 ? images : entry.media.filter((media) => media.type === "video");
   }, [entry.media]);
-  const [coverIndex, setCoverIndex] = useState(() =>
-    covers.length > 0 ? Math.abs(entry.layoutSeed) % covers.length : 0,
-  );
+  const firstCover = covers[0];
+  const [coverIndex, setCoverIndex] = useState(0);
+  const [coverAspectRatio, setCoverAspectRatio] = useState(() => mediaAspectRatio(firstCover));
   const cover = covers[coverIndex % Math.max(covers.length, 1)];
   const isWide = entry.layoutPreset === "film" || (entry.layoutPreset === "auto" && Boolean(cover));
 
@@ -39,7 +44,10 @@ export function EntryCard({ entry, onOpen }: EntryCardProps) {
       className="entry-card"
       data-layout={entry.layoutPreset}
       data-wide={isWide}
-      style={{ "--journal-color": entry.journalColor } as React.CSSProperties}
+      style={{
+        "--journal-color": entry.journalColor,
+        "--cover-aspect-ratio": coverAspectRatio ?? "4 / 3",
+      } as React.CSSProperties}
     >
       <button
         className="entry-card__open"
@@ -51,7 +59,12 @@ export function EntryCard({ entry, onOpen }: EntryCardProps) {
       {cover ? (
         <figure className="entry-card__media">
           <div className="entry-card__media-frame" key={cover.id}>
-            <EntryMedia media={cover} />
+            <EntryMedia
+              media={cover}
+              onIntrinsicSize={cover.id === firstCover?.id
+                ? (width, height) => setCoverAspectRatio(width / height)
+                : undefined}
+            />
           </div>
           {cover.caption ? <figcaption>{cover.caption}</figcaption> : null}
           {covers.length > 1 ? (
