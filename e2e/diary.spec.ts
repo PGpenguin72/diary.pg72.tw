@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
+import type { TimelineResponse } from "../shared/api";
 import {
   TextReader,
   Uint8ArrayReader,
@@ -196,12 +197,20 @@ test("@desktop timeline cards use ordered masonry columns", async ({ page }, tes
     "最後一篇用不同高度確認每一欄都會獨立往上排列。".repeat(4),
   ];
 
+  const timelineResponse = await page.request.get("/api/entries?limit=30");
+  expect(timelineResponse.ok()).toBe(true);
+  const existingTitles = new Set(
+    ((await timelineResponse.json()) as TimelineResponse).entries.map((entry) => entry.title),
+  );
+
   for (const [index, body] of bodies.entries()) {
+    const title = `時間軸測試 ${index + 1}`;
+    if (existingTitles.has(title)) continue;
     const day = 14 - index;
     const localDate = `2026-07-${String(day).padStart(2, "0")}`;
     const response = await page.request.post("/api/entries", {
       data: {
-        title: `時間軸測試 ${index + 1}`,
+        title,
         body,
         occurredAt: `${localDate}T12:00:00.000Z`,
         timezone: "Asia/Taipei",
@@ -214,7 +223,7 @@ test("@desktop timeline cards use ordered masonry columns", async ({ page }, tes
   }
 
   await page.goto("/");
-  await page.getByRole("button", { name: "時間軸" }).click();
+  await page.getByRole("button", { name: "時間軸", exact: true }).click();
   const items = page.locator(".timeline-masonry-item");
   await expect(items).toHaveCount(7);
   await expect.poll(() => items.evaluateAll((elements) =>
