@@ -1050,17 +1050,6 @@ img {
   margin-top: 5px;
 }
 
-.load-error code {
-  padding: 1px 5px;
-  color: var(--ink);
-  font-size: 11px;
-  word-break: break-all;
-  user-select: all;
-  background: var(--surface-raised);
-  border: 1px solid var(--line);
-  border-radius: 4px;
-}
-
 .dialog-backdrop {
   position: fixed;
   inset: 0;

@@ -103,7 +103,7 @@
 - Worker 端：`/api/*` guard middleware（`/api/health` 與 `/api/auth/*` 放行；localhost bypass；**讀取公開**；mutation 需有效 session，subject 不符回 403，並檢查 Origin）。auth 路由：`/api/auth/{login,callback,logout,session,backchannel-logout}`。
 - Session：cookie 只存隨機 token（正式環境 `__Host-diary_session`），D1 `auth_sessions` 存 SHA-256 hash，7 天絕對效期。access/refresh token 不落地。
 - 緊急撤銷 kill switch：`wrangler d1 execute diary-pg72-tw-db --remote --command "DELETE FROM auth_sessions"`。
-- Bootstrap 擁有者 `sub`（2026-07-15 已完成，`AUTH_ALLOWED_SUBJECT` 已填入 wrangler.jsonc）：`.dev.vars` 設 `AUTH_CLIENT_ID=pg72-diary-dev` → `pnpm dev` → 開 `http://127.0.0.1:5173/api/auth/login` 登入 → sub 不符時會以 `/?authError=SUBJECT_NOT_ALLOWED&sub=...` 導回，登入畫面（remote）或首頁警示列（localhost bypass）都會顯示 sub → 填入 `wrangler.jsonc` 的 `AUTH_ALLOWED_SUBJECT`。dev/prod client 的 `subjectType` 都是 `public`，sub 相同。
+- 擁有者 `sub` 已於 2026-07-15 完成 bootstrap 並填入 `wrangler.jsonc` 的 `AUTH_ALLOWED_SUBJECT`。UI 不顯示 sub（使用者要求）；日後要重查或換帳號，直接查 SSO 的 user 表：`cd ~/sso.pg72.tw/apps/sso && pnpm exec wrangler d1 execute PG72_ID_DB --remote --command "SELECT id, email FROM user"`（`subjectType='public'`，sub 即 user id，dev/prod client 相同）。
 - Back-channel logout endpoint 已就緒但 SSO 端尚未實作遞送（單向 forward-compatible）；中央撤銷目前最長 7 天後才會在日記端失效。
 
 ## API 與資料入口

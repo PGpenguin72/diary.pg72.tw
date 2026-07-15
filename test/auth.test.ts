@@ -338,9 +338,7 @@ describe("login and callback flow", () => {
       { headers: { Cookie: `${TX_COOKIE}=${transactionId}` } },
     );
     expect(callbackResponse.status).toBe(302);
-    expect(callbackResponse.headers.get("Location")).toBe(
-      "/?authError=SUBJECT_NOT_ALLOWED&sub=intruder-subject-1",
-    );
+    expect(callbackResponse.headers.get("Location")).toBe("/?authError=SUBJECT_NOT_ALLOWED");
     expect(await countSessions()).toBe(0);
   });
 

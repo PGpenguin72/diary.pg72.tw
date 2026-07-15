@@ -247,7 +247,7 @@ authRoutes.get("/auth/callback", async (context) => {
   if (!config.allowedSubject || subject !== config.allowedSubject) {
     noStore(context);
     return context.redirect(
-      `/?authError=SUBJECT_NOT_ALLOWED&sub=${encodeURIComponent(subject)}`,
+      "/?authError=SUBJECT_NOT_ALLOWED",
       302,
     );
   }

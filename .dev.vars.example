@@ -5,8 +5,8 @@
 # Local public client registered on sso.pg72.tw (no client secret needed).
 AUTH_CLIENT_ID=pg72-diary-dev
 
-# First login redirects to /?authError=SUBJECT_NOT_ALLOWED&sub=<your-sub>.
-# Paste that sub here (and into wrangler.jsonc for production) and log in again.
+# Owner OIDC sub. Already set in wrangler.jsonc; to look it up again, query the
+# SSO user table: wrangler d1 execute PG72_ID_DB --remote --command "SELECT id FROM user"
 #AUTH_ALLOWED_SUBJECT=
 
 # Only for the production confidential client (never commit the real value).

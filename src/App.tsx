@@ -208,9 +208,7 @@ export default function App() {
           <div className="load-error" role="alert">
             <AlertCircle aria-hidden="true" size={24} />
             {authNotice.code === "SUBJECT_NOT_ALLOWED" ? (
-              <strong>
-                此帳號尚未獲授權。你的帳號識別碼（sub）：<code>{authNotice.sub}</code>
-              </strong>
+              <strong>此帳號尚未獲授權，這本日記只開放擁有者寫入。</strong>
             ) : (
               <strong>登入沒有完成，請再試一次。</strong>
             )}
