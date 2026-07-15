@@ -1,0 +1,66 @@
+import { Plus, Search, Upload, X } from "lucide-react";
+import { useId } from "react";
+import { getTodayLabel } from "../lib/format";
+
+interface PageHeaderProps {
+  eyebrow: string;
+  title: string;
+  searchQuery: string;
+  onChangeSearch: (query: string) => void;
+  onNewEntry: () => void;
+  onImport: () => void;
+}
+
+export function PageHeader({
+  eyebrow,
+  title,
+  searchQuery,
+  onChangeSearch,
+  onNewEntry,
+  onImport,
+}: PageHeaderProps) {
+  const searchId = useId();
+
+  return (
+    <header className="page-header">
+      <div className="page-header__title">
+        <strong className="mobile-brand">PG72 Diary</strong>
+        <span>{eyebrow}</span>
+        <h1>{title}</h1>
+        <p>{getTodayLabel()}</p>
+      </div>
+
+      <div className="page-actions">
+        <label className="search-field" htmlFor={searchId}>
+          <Search aria-hidden="true" size={18} />
+          <input
+            id={searchId}
+            type="search"
+            value={searchQuery}
+            placeholder="搜尋日記"
+            onChange={(event) => onChangeSearch(event.target.value)}
+          />
+          {searchQuery ? (
+            <button
+              type="button"
+              title="清除搜尋"
+              aria-label="清除搜尋"
+              onClick={() => onChangeSearch("")}
+            >
+              <X aria-hidden="true" size={16} />
+            </button>
+          ) : null}
+        </label>
+
+        <button className="button button--secondary" type="button" onClick={onImport}>
+          <Upload aria-hidden="true" size={17} />
+          <span>匯入</span>
+        </button>
+        <button className="button button--primary" type="button" onClick={onNewEntry}>
+          <Plus aria-hidden="true" size={18} />
+          <span>新增日記</span>
+        </button>
+      </div>
+    </header>
+  );
+}
