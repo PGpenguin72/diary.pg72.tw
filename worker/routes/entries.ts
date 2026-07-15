@@ -12,7 +12,6 @@ import type {
   TimelineResponse,
 } from "../../shared/api";
 import { apiError, noStore } from "../lib/http";
-import { hasWriteAccess } from "../lib/write-access";
 
 const timelineQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(30).default(12),
@@ -225,10 +224,6 @@ entryRoutes.get("/entries", async (context) => {
 });
 
 entryRoutes.post("/entries", async (context) => {
-  if (!hasWriteAccess(context.req.url)) {
-    return apiError(context, 401, "AUTH_REQUIRED", "需要先登入才能新增日記。" );
-  }
-
   const contentLength = Number(context.req.header("Content-Length") ?? 0);
   if (Number.isFinite(contentLength) && contentLength > 120_000) {
     return apiError(context, 413, "ENTRY_TOO_LARGE", "這篇日記超過目前可接受的大小。" );

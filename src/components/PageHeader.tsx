@@ -1,4 +1,4 @@
-import { Plus, Search, Upload, X } from "lucide-react";
+import { LogOut, Plus, Search, Upload, X } from "lucide-react";
 import { useId } from "react";
 import { getTodayLabel } from "../lib/format";
 
@@ -6,18 +6,26 @@ interface PageHeaderProps {
   eyebrow: string;
   title: string;
   searchQuery: string;
+  canWrite: boolean;
+  showLogout: boolean;
+  loggingOut: boolean;
   onChangeSearch: (query: string) => void;
   onNewEntry: () => void;
   onImport: () => void;
+  onLogout: () => void;
 }
 
 export function PageHeader({
   eyebrow,
   title,
   searchQuery,
+  canWrite,
+  showLogout,
+  loggingOut,
   onChangeSearch,
   onNewEntry,
   onImport,
+  onLogout,
 }: PageHeaderProps) {
   const searchId = useId();
 
@@ -52,14 +60,30 @@ export function PageHeader({
           ) : null}
         </label>
 
-        <button className="button button--secondary" type="button" onClick={onImport}>
-          <Upload aria-hidden="true" size={17} />
-          <span>匯入</span>
-        </button>
-        <button className="button button--primary" type="button" onClick={onNewEntry}>
-          <Plus aria-hidden="true" size={18} />
-          <span>新增日記</span>
-        </button>
+        {canWrite ? (
+          <>
+            <button className="button button--secondary" type="button" onClick={onImport}>
+              <Upload aria-hidden="true" size={17} />
+              <span>匯入</span>
+            </button>
+            <button className="button button--primary" type="button" onClick={onNewEntry}>
+              <Plus aria-hidden="true" size={18} />
+              <span>新增日記</span>
+            </button>
+          </>
+        ) : null}
+
+        {showLogout ? (
+          <button
+            className="button button--secondary"
+            type="button"
+            disabled={loggingOut}
+            onClick={onLogout}
+          >
+            <LogOut aria-hidden="true" size={17} />
+            <span>登出</span>
+          </button>
+        ) : null}
       </div>
     </header>
   );

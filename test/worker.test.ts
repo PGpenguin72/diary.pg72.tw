@@ -64,7 +64,7 @@ describe("diary Worker API", () => {
     expect(response.status).toBe(400);
   });
 
-  it("does not allow writes on a remote hostname before Access verification is configured", async () => {
+  it("denies remote writes without a PG72 ID session", async () => {
     const response = await exports.default.fetch(
       new Request("https://diary.pg72.tw/api/entries", {
         method: "POST",
@@ -74,6 +74,37 @@ describe("diary Worker API", () => {
     );
 
     expect(response.status).toBe(401);
+  });
+
+  it("denies remote reads without a PG72 ID session", async () => {
+    for (const path of ["/api/entries", "/api/overview", "/api/media/x"]) {
+      const response = await exports.default.fetch(
+        new Request(`https://diary.pg72.tw${path}`),
+      );
+      expect(response.status, path).toBe(401);
+      const payload = await response.json<{ error: { code: string } }>();
+      expect(payload.error.code, path).toBe("AUTH_REQUIRED");
+    }
+  });
+
+  it("keeps the health check open on a remote hostname", async () => {
+    const response = await exports.default.fetch(
+      new Request("https://diary.pg72.tw/api/health"),
+    );
+    expect(response.status).toBe(200);
+  });
+
+  it("reports an unauthenticated remote session", async () => {
+    const response = await exports.default.fetch(
+      new Request("https://diary.pg72.tw/api/auth/session"),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      authenticated: false,
+      canWrite: false,
+      localBypass: false,
+      user: null,
+    });
   });
 
   it("imports Apple Journal entries and media idempotently on localhost", async () => {

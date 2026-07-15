@@ -16,7 +16,7 @@
 - GitHub 目前只有 `CI` workflow，最新 `main` run 已成功：<https://github.com/PGpenguin72/diary.pg72.tw/actions/runs/29409349057>。
 - Cloudflare 遠端 R2 bucket `diary-pg72-tw-media` 已建立且目前為空；遠端 D1 `diary-pg72-tw-db` 和 Worker `diary-pg72-tw` 尚未建立。
 - `diary.pg72.tw` 目前沒有 DNS record，因此沒有 production 網站，也尚未完成 GitHub push 後自動部署。
-- Remote mutation 仍刻意封鎖。未完成 Cloudflare Access JWT server-side 驗證前，不得以 hostname、前端狀態、自訂 header 或 email 欄位繞過。
+- 遠端讀寫已改由 PG72 ID（`sso.pg72.tw`，自建 OIDC IdP）登入保護：Worker server-side 驗證 code + PKCE 與 EdDSA ID token 後建立 D1 session，僅允許 `AUTH_ALLOWED_SUBJECT` 設定的擁有者 `sub`。不得以 hostname、前端狀態、自訂 header 或 email 欄位繞過；唯一豁免是 localhost 開發 bypass。詳見下方「登入與授權」。
 
 ## 本機私密資料狀態
 
@@ -94,6 +94,18 @@
 - `shared/schemas.ts`
 - `migrations/0001_initial.sql`
 
+## 登入與授權（PG72 ID OIDC）
+
+- IdP 是使用者自建的 PG72 ID（repo `~/sso.pg72.tw`，已上線於 `https://sso.pg72.tw`）。整合規範以該 repo 的 `codex.md` §10–§11 為準。
+- 已註冊兩個 client（seed：`~/sso.pg72.tw/apps/sso/seed/diary-clients.sql`）：
+  - `pg72-diary`：production 機密 client，`client_secret_basic` + PKCE，redirect `https://diary.pg72.tw/api/auth/callback`。secret 原文存於 gitignored 的 `~/sso.pg72.tw/apps/sso/.env.diary-client-secret`（部署 production 時 `wrangler secret put AUTH_CLIENT_SECRET`）。
+  - `pg72-diary-dev`：本機 public client（PKCE、無 secret），redirect `http://127.0.0.1:5173/api/auth/callback`。
+- Worker 端：`/api/*` guard middleware（`/api/health` 與 `/api/auth/*` 放行；localhost bypass；其他路由需有效 session，subject 不符回 403，非本機 mutation 另檢查 Origin）。auth 路由：`/api/auth/{login,callback,logout,session,backchannel-logout}`。
+- Session：cookie 只存隨機 token（正式環境 `__Host-diary_session`），D1 `auth_sessions` 存 SHA-256 hash，7 天絕對效期。access/refresh token 不落地。
+- 緊急撤銷 kill switch：`wrangler d1 execute diary-pg72-tw-db --remote --command "DELETE FROM auth_sessions"`。
+- Bootstrap 擁有者 `sub`（2026-07-15 已完成，`AUTH_ALLOWED_SUBJECT` 已填入 wrangler.jsonc）：`.dev.vars` 設 `AUTH_CLIENT_ID=pg72-diary-dev` → `pnpm dev` → 開 `http://127.0.0.1:5173/api/auth/login` 登入 → sub 不符時會以 `/?authError=SUBJECT_NOT_ALLOWED&sub=...` 導回，登入畫面（remote）或首頁警示列（localhost bypass）都會顯示 sub → 填入 `wrangler.jsonc` 的 `AUTH_ALLOWED_SUBJECT`。dev/prod client 的 `subjectType` 都是 `public`，sub 相同。
+- Back-channel logout endpoint 已就緒但 SSO 端尚未實作遞送（單向 forward-compatible）；中央撤銷目前最長 7 天後才會在日記端失效。
+
 ## API 與資料入口
 
 目前 Worker routes：
@@ -133,8 +145,8 @@
 因此不要執行 production migration、上傳真實資料或開放 remote mutation。正確的 production foundation 順序是：
 
 1. 決定並建立清楚分離的 preview / production resources。
-2. 建立 production D1，補上正確 binding / resource ID，套用 migration。
-3. 完成 Cloudflare Access policy 與 Worker 端 Access JWT 驗證，先測 unauthorized/authorized routes。
+2. 建立 production D1，補上正確 binding / resource ID，套用 migration（含 `0002_auth.sql`）。
+3. 設定 production 登入：`wrangler secret put AUTH_CLIENT_SECRET`（值在 `~/sso.pg72.tw/apps/sso/.env.diary-client-secret`）、確認 `AUTH_ALLOWED_SUBJECT` 已填擁有者 sub，先測 unauthorized/authorized routes（第一次 production 登入才會實際演練 `client_secret_basic`）。
 4. 設定 Workers Builds 或等價 GitHub deployment；CI 與 deploy 分開，migration 要有可觀察的獨立步驟。
 5. 部署 Worker + Static Assets，再綁 custom domain / DNS。
 6. 用合成資料做 production smoke test；確認 R2 private、API auth、媒體讀取與 log 無內容外洩後，才考慮真實匯入。
@@ -145,20 +157,20 @@ Cloudflare CLI 指令執行前先讀 Cloudflare / Wrangler skill 或目前官方
 
 以下是後續工作的主要缺口，不要把 README 的規劃誤認為已實作：
 
-1. **Production auth / environment isolation**：Cloudflare Access JWT、preview/production D1/R2、Worker deploy、custom domain 都未完成。
+1. **Production environment isolation 與部署**：登入程式碼（PG72 ID OIDC）已完成，但 preview/production D1/R2、Worker deploy、custom domain、production secret 設定都未完成；back-channel logout 遞送要等 SSO 端實作。
 2. **大型媒體 upload**：目前附件仍經 Worker request body 寫 R2；真實 archive 有約 157.4 MB 單檔，會超過常見 100 MB request body 限制。需要 object-scoped direct upload authorization 與 R2 multipart/resume。
 3. **匯入 reconciliation**：已有基本進度與去重，但完整可下載 error report、部分完成狀態、逐 part retry、checksum reconciliation 和中斷後精確續傳仍需補強。
 4. **Apple schema / codec 相容性**：Apple 未承諾 HTML schema 穩定；HEIC/HEVC/HDR 的跨瀏覽器顯示、縮圖和必要轉碼尚未完整解決。
 5. **編輯工作流**：目前只有基本文字新增；rich block editor、draft/autosave、編輯、刪除/復原、附件線上上傳、位置/標籤管理尚未完成。
 6. **資料可攜與復原**：完整 export、backup/checkpoint、restore 與 final R2 cleanup 尚未完成。
 7. **規模與查詢**：需要 10,000 entries fixture、query-plan 檢查、完整 pagination / load-more 與更完整的 calendar/places/insights 行為。
-8. **測試覆蓋**：尚缺 Access boundary、direct/multipart upload、malformed archive、delete recovery、完整 export 與 production smoke tests。
+8. **測試覆蓋**：尚缺 production 實地登入邊界驗證、direct/multipart upload、malformed archive、delete recovery、完整 export 與 production smoke tests。
 
 ## 建議接手順序
 
 除非使用者指定另一個 UI 任務，優先順序建議如下：
 
-1. 先完成 production/preview environment 設計與 Cloudflare Access JWT 驗證，讓線上版本有可信的私密邊界。
+1. 先完成 production/preview environment 建置與部署（含 `AUTH_CLIENT_SECRET`、`AUTH_ALLOWED_SUBJECT` 與登入邊界實測），讓線上版本有可信的私密邊界。
 2. 實作 private R2 direct + multipart upload；用大於 100 MB 的合成媒體測試 retry、resume、size/MIME 限制與 cleanup。
 3. 補 Apple importer reconciliation / error report，並將已知真實 export 變體縮成無隱私的最小合成 fixture。
 4. 再做 entry edit、draft/autosave、附件管理、刪除復原與完整 export。

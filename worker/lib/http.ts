@@ -10,7 +10,7 @@ export function noStore<E extends HonoEnv, P extends string, I extends Input>(
 
 export function apiError<E extends HonoEnv, P extends string, I extends Input>(
   context: Context<E, P, I>,
-  status: 400 | 401 | 404 | 413 | 500,
+  status: 400 | 401 | 403 | 404 | 413 | 500,
   code: string,
   message: string,
 ) {

@@ -6,6 +6,7 @@ import type {
   ImportAppleJournalEntryResponse,
   ImportAppleJournalMediaResponse,
   OverviewResponse,
+  SessionResponse,
   StartAppleJournalImportResponse,
   TimelineResponse,
 } from "./api";
@@ -109,3 +110,15 @@ export const importAppleJournalMediaResponseSchema = z.object({
 export const completeAppleJournalImportResponseSchema = z.object({
   status: z.enum(["completed", "completed-with-errors"]),
 }) satisfies z.ZodType<CompleteAppleJournalImportResponse>;
+
+export const sessionResponseSchema = z.object({
+  authenticated: z.boolean(),
+  canWrite: z.boolean(),
+  localBypass: z.boolean(),
+  user: z
+    .object({
+      name: z.string().nullable(),
+      email: z.string().nullable(),
+    })
+    .nullable(),
+}) satisfies z.ZodType<SessionResponse>;

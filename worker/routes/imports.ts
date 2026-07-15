@@ -10,7 +10,6 @@ import type {
   StartAppleJournalImportResponse,
 } from "../../shared/api";
 import { apiError, noStore } from "../lib/http";
-import { hasWriteAccess } from "../lib/write-access";
 
 const startImportSchema = z.object({
   fileName: z.string().trim().min(1).max(255),
@@ -120,10 +119,6 @@ async function readJson(context: { req: { json(): Promise<unknown> } }): Promise
 }
 
 importRoutes.post("/imports/apple-journal", async (context) => {
-  if (!hasWriteAccess(context.req.url)) {
-    return apiError(context, 401, "AUTH_REQUIRED", "需要先登入才能匯入日記。");
-  }
-
   const parsed = startImportSchema.safeParse(await readJson(context));
   if (!parsed.success) {
     return apiError(context, 400, "INVALID_IMPORT", "Apple Journal 匯入資訊不完整。");
@@ -168,10 +163,6 @@ importRoutes.post("/imports/apple-journal", async (context) => {
 });
 
 importRoutes.post("/imports/apple-journal/:importId/entries", async (context) => {
-  if (!hasWriteAccess(context.req.url)) {
-    return apiError(context, 401, "AUTH_REQUIRED", "需要先登入才能匯入日記。");
-  }
-
   const importId = context.req.param("importId");
   const parsed = importEntrySchema.safeParse(await readJson(context));
   if (!parsed.success) {
@@ -335,10 +326,6 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
 });
 
 importRoutes.post("/imports/apple-journal/:importId/entries/:entryId/media", async (context) => {
-  if (!hasWriteAccess(context.req.url)) {
-    return apiError(context, 401, "AUTH_REQUIRED", "需要先登入才能匯入媒體。");
-  }
-
   const importId = context.req.param("importId");
   const entryId = context.req.param("entryId");
   const query = mediaQuerySchema.safeParse(context.req.query());
@@ -467,10 +454,6 @@ importRoutes.post("/imports/apple-journal/:importId/entries/:entryId/media", asy
 });
 
 importRoutes.post("/imports/apple-journal/:importId/complete", async (context) => {
-  if (!hasWriteAccess(context.req.url)) {
-    return apiError(context, 401, "AUTH_REQUIRED", "需要先登入才能完成匯入。");
-  }
-
   const parsed = completeImportSchema.safeParse(await readJson(context));
   if (!parsed.success) {
     return apiError(context, 400, "INVALID_IMPORT_SUMMARY", "匯入結果格式不完整。");

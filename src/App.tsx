@@ -1,7 +1,8 @@
 import { AlertCircle, LoaderCircle } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
-import type { EntryDetail, OverviewResponse, TimelineEntry } from "../shared/api";
+import type { EntryDetail, OverviewResponse, SessionResponse, TimelineEntry } from "../shared/api";
 import { AppShell, type AppView } from "./components/AppShell";
+import { LoginScreen } from "./components/LoginScreen";
 import { NewEntryDialog } from "./components/NewEntryDialog";
 import { PageHeader } from "./components/PageHeader";
 import {
@@ -11,7 +12,16 @@ import {
   PlacesView,
   TimelineView,
 } from "./components/Views";
-import { createEntry, getEntry, getOverview, getTimeline } from "./lib/api";
+import {
+  ApiRequestError,
+  createEntry,
+  getEntry,
+  getOverview,
+  getSession,
+  getTimeline,
+  logout,
+} from "./lib/api";
+import { clearAuthErrorParams, readAuthErrorNotice } from "./lib/auth-notice";
 
 const ImportDialog = lazy(async () => {
   const module = await import("./components/ImportDialog");
@@ -31,6 +41,14 @@ interface AppData {
 async function fetchAppData(): Promise<AppData> {
   const [overview, timeline] = await Promise.all([getOverview(), getTimeline()]);
   return { overview, entries: timeline.entries };
+}
+
+function isUnauthorized(error: unknown): boolean {
+  return error instanceof ApiRequestError && error.status === 401;
+}
+
+function needsLoginScreen(session: SessionResponse): boolean {
+  return !session.authenticated && !session.localBypass;
 }
 
 const viewTitles: Record<AppView, { eyebrow: string; title: string }> = {
@@ -53,6 +71,16 @@ export default function App() {
   const [showComposer, setShowComposer] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [session, setSession] = useState<SessionResponse | null>(null);
+  const [needsLogin, setNeedsLogin] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
+  const [authNotice, setAuthNotice] = useState(readAuthErrorNotice);
+
+  useEffect(() => {
+    if (authNotice) {
+      clearAuthErrorParams();
+    }
+  }, [authNotice]);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -61,7 +89,11 @@ export default function App() {
     try {
       setData(await fetchAppData());
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : "暫時無法讀取日記。" );
+      if (isUnauthorized(error)) {
+        setNeedsLogin(true);
+      } else {
+        setLoadError(error instanceof Error ? error.message : "暫時無法讀取日記。" );
+      }
     } finally {
       setLoading(false);
     }
@@ -70,18 +102,37 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
 
-    void fetchAppData()
-      .then((nextData) => {
-        if (!cancelled) setData(nextData);
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) {
-          setLoadError(error instanceof Error ? error.message : "暫時無法讀取日記。" );
+    void Promise.allSettled([getSession(), fetchAppData()]).then(
+      ([sessionResult, dataResult]) => {
+        if (cancelled) return;
+
+        if (sessionResult.status === "rejected") {
+          const reason: unknown = sessionResult.reason;
+          setLoadError(reason instanceof Error ? reason.message : "暫時無法讀取日記。" );
+          setLoading(false);
+          return;
         }
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+
+        setSession(sessionResult.value);
+
+        if (needsLoginScreen(sessionResult.value)) {
+          setNeedsLogin(true);
+          setLoading(false);
+          return;
+        }
+
+        if (dataResult.status === "fulfilled") {
+          setData(dataResult.value);
+        } else if (isUnauthorized(dataResult.reason)) {
+          setNeedsLogin(true);
+        } else {
+          const reason: unknown = dataResult.reason;
+          setLoadError(reason instanceof Error ? reason.message : "暫時無法讀取日記。" );
+        }
+
+        setLoading(false);
+      },
+    );
 
     return () => {
       cancelled = true;
@@ -107,7 +158,11 @@ export default function App() {
     try {
       setSelectedEntry(await getEntry(entryId));
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : "暫時無法讀取這篇日記。" );
+      if (isUnauthorized(error)) {
+        setNeedsLogin(true);
+      } else {
+        setLoadError(error instanceof Error ? error.message : "暫時無法讀取這篇日記。" );
+      }
       setEntryLoading(false);
       return;
     }
@@ -124,13 +179,33 @@ export default function App() {
       setShowComposer(false);
       await loadData();
     } catch (error) {
-      setSaveError(error instanceof Error ? error.message : "暫時無法儲存這篇日記。" );
+      if (isUnauthorized(error)) {
+        setNeedsLogin(true);
+      } else {
+        setSaveError(error instanceof Error ? error.message : "暫時無法儲存這篇日記。" );
+      }
     } finally {
       setSaving(false);
     }
   }
 
+  async function handleLogout() {
+    setLoggingOut(true);
+
+    try {
+      await logout();
+      window.location.assign("/");
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : "暫時無法登出。" );
+      setLoggingOut(false);
+    }
+  }
+
   const header = viewTitles[activeView];
+
+  if (needsLogin) {
+    return <LoginScreen notice={authNotice} />;
+  }
 
   return (
     <AppShell activeView={activeView} onChangeView={setActiveView}>
@@ -138,15 +213,39 @@ export default function App() {
         eyebrow={header.eyebrow}
         title={header.title}
         searchQuery={searchQuery}
+        canWrite={session ? session.canWrite : true}
+        showLogout={session ? session.authenticated && !session.localBypass : false}
+        loggingOut={loggingOut}
         onChangeSearch={setSearchQuery}
         onImport={() => setShowImport(true)}
         onNewEntry={() => {
           setSaveError(null);
           setShowComposer(true);
         }}
+        onLogout={() => void handleLogout()}
       />
 
       <main className="page-main">
+        {authNotice ? (
+          <div className="load-error" role="alert">
+            <AlertCircle aria-hidden="true" size={24} />
+            {authNotice.code === "SUBJECT_NOT_ALLOWED" ? (
+              <strong>
+                此帳號尚未獲授權。你的帳號識別碼（sub）：<code>{authNotice.sub}</code>
+              </strong>
+            ) : (
+              <strong>登入沒有完成，請再試一次。</strong>
+            )}
+            <button
+              className="button button--secondary"
+              type="button"
+              onClick={() => setAuthNotice(null)}
+            >
+              知道了
+            </button>
+          </div>
+        ) : null}
+
         {loading ? (
           <div className="app-loading">
             <LoaderCircle aria-hidden="true" className="spin" size={28} />

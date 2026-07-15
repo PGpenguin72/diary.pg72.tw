@@ -136,6 +136,18 @@ export interface CompleteAppleJournalImportResponse {
   status: "completed" | "completed-with-errors";
 }
 
+export interface SessionUser {
+  name: string | null;
+  email: string | null;
+}
+
+export interface SessionResponse {
+  authenticated: boolean;
+  canWrite: boolean;
+  localBypass: boolean;
+  user: SessionUser | null;
+}
+
 export interface ApiError {
   error: {
     code: string;

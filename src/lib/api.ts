@@ -8,6 +8,7 @@ import type {
   ImportAppleJournalEntryResponse,
   ImportAppleJournalMediaResponse,
   OverviewResponse,
+  SessionResponse,
   StartAppleJournalImportInput,
   StartAppleJournalImportResponse,
   TimelineResponse,
@@ -19,6 +20,7 @@ import {
   importAppleJournalEntryResponseSchema,
   importAppleJournalMediaResponseSchema,
   overviewResponseSchema,
+  sessionResponseSchema,
   startAppleJournalImportResponseSchema,
   timelineResponseSchema,
 } from "../../shared/schemas";
@@ -32,6 +34,29 @@ export class ApiRequestError extends Error {
     super(message);
     this.name = "ApiRequestError";
   }
+}
+
+async function readErrorMessage(response: Response): Promise<string> {
+  let message = "暫時無法完成這個動作。";
+
+  try {
+    const payload: unknown = await response.json();
+    if (
+      typeof payload === "object" &&
+      payload !== null &&
+      "error" in payload &&
+      typeof payload.error === "object" &&
+      payload.error !== null &&
+      "message" in payload.error &&
+      typeof payload.error.message === "string"
+    ) {
+      message = payload.error.message;
+    }
+  } catch {
+    // The status code remains the authoritative failure signal.
+  }
+
+  return message;
 }
 
 async function requestJson<T>(
@@ -48,26 +73,7 @@ async function requestJson<T>(
   });
 
   if (!response.ok) {
-    let message = "暫時無法完成這個動作。";
-
-    try {
-      const payload: unknown = await response.json();
-      if (
-        typeof payload === "object" &&
-        payload !== null &&
-        "error" in payload &&
-        typeof payload.error === "object" &&
-        payload.error !== null &&
-        "message" in payload.error &&
-        typeof payload.error.message === "string"
-      ) {
-        message = payload.error.message;
-      }
-    } catch {
-      // The status code remains the authoritative failure signal.
-    }
-
-    throw new ApiRequestError(message, response.status);
+    throw new ApiRequestError(await readErrorMessage(response), response.status);
   }
 
   const payload: unknown = await response.json();
@@ -78,6 +84,28 @@ async function requestJson<T>(
   }
 
   return parsed.data;
+}
+
+async function requestNoContent(input: RequestInfo | URL, init?: RequestInit): Promise<void> {
+  const response = await fetch(input, {
+    ...init,
+    headers: {
+      Accept: "application/json",
+      ...init?.headers,
+    },
+  });
+
+  if (!response.ok) {
+    throw new ApiRequestError(await readErrorMessage(response), response.status);
+  }
+}
+
+export function getSession(): Promise<SessionResponse> {
+  return requestJson("/api/auth/session", sessionResponseSchema);
+}
+
+export function logout(): Promise<void> {
+  return requestNoContent("/api/auth/logout", { method: "POST" });
 }
 
 export function getOverview(): Promise<OverviewResponse> {

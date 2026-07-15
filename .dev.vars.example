@@ -1,0 +1,13 @@
+# Local manual login against the real PG72 ID SSO (optional).
+# Copy to .dev.vars, then open http://127.0.0.1:5173/api/auth/login after `pnpm dev`.
+# Without .dev.vars localhost keeps its normal no-login dev bypass.
+
+# Local public client registered on sso.pg72.tw (no client secret needed).
+AUTH_CLIENT_ID=pg72-diary-dev
+
+# First login redirects to /?authError=SUBJECT_NOT_ALLOWED&sub=<your-sub>.
+# Paste that sub here (and into wrangler.jsonc for production) and log in again.
+#AUTH_ALLOWED_SUBJECT=
+
+# Only for the production confidential client (never commit the real value).
+#AUTH_CLIENT_SECRET=

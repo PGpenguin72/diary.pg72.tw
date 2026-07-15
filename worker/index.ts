@@ -1,20 +1,25 @@
 import { Hono } from "hono";
+import { authGuard, type AuthVariables } from "./lib/auth/middleware";
 import { apiError, noStore } from "./lib/http";
+import { authRoutes } from "./routes/auth";
 import { entryRoutes } from "./routes/entries";
 import { importRoutes } from "./routes/imports";
 import { overviewRoutes } from "./routes/overview";
 
-const app = new Hono<{ Bindings: Env }>();
+const app = new Hono<{ Bindings: Env; Variables: AuthVariables }>();
 
 app.use("/api/*", async (context, next) => {
   noStore(context);
   await next();
 });
 
+app.use("/api/*", authGuard);
+
 app.get("/api/health", (context) => {
   return context.json({ status: "ok", service: "diary-pg72-tw" });
 });
 
+app.route("/api", authRoutes);
 app.route("/api", overviewRoutes);
 app.route("/api", entryRoutes);
 app.route("/api", importRoutes);

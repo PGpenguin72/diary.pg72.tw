@@ -9,6 +9,14 @@
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/api/*"]
   },
+  "vars": {
+    // PG72 ID OIDC relying-party settings. AUTH_CLIENT_SECRET is a Worker secret
+    // (wrangler secret put); without it the Worker runs as a public client.
+    "AUTH_ISSUER": "https://sso.pg72.tw",
+    "AUTH_CLIENT_ID": "pg72-diary",
+    // Owner OIDC `sub` allowlist (opaque PG72 ID user id; not a secret).
+    "AUTH_ALLOWED_SUBJECT": "cfa13329-4678-4a11-b5dd-489758e9af1b"
+  },
   "d1_databases": [
     {
       "binding": "DB",
