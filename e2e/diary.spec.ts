@@ -185,3 +185,62 @@ test("@desktop entry, composer, and import surfaces are usable", async ({ page }
   await repeatedImport.getByRole("button", { name: "開始匯入" }).click();
   await expect(repeatedImport.getByText("0 篇已寫入 · 1 篇重複")).toBeVisible();
 });
+
+test("@desktop timeline cards use ordered masonry columns", async ({ page }, testInfo) => {
+  const bodies = [
+    "短短記下一件今天發生的事。",
+    "這是一篇比較長的日記內容。".repeat(18),
+    "中等長度的文字，讓卡片高度和左右兩張不一樣。".repeat(5),
+    "第二列的短篇。",
+    "第二列稍微長一點的內容。".repeat(8),
+    "最後一篇用不同高度確認每一欄都會獨立往上排列。".repeat(4),
+  ];
+
+  for (const [index, body] of bodies.entries()) {
+    const day = 14 - index;
+    const localDate = `2026-07-${String(day).padStart(2, "0")}`;
+    const response = await page.request.post("/api/entries", {
+      data: {
+        title: `時間軸測試 ${index + 1}`,
+        body,
+        occurredAt: `${localDate}T12:00:00.000Z`,
+        timezone: "Asia/Taipei",
+        localDate,
+        location: index % 2 === 0 ? "測試地點" : null,
+        mood: null,
+      },
+    });
+    expect(response.ok()).toBe(true);
+  }
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "時間軸" }).click();
+  const items = page.locator(".timeline-masonry-item");
+  await expect(items).toHaveCount(7);
+  await expect.poll(() => items.evaluateAll((elements) =>
+    elements.every((element) => Number.parseInt(
+      getComputedStyle(element).getPropertyValue("--timeline-row-span"),
+      10,
+    ) > 1),
+  )).toBe(true);
+
+  expect(await items.evaluateAll((elements) =>
+    elements.slice(0, 6).map((element) => getComputedStyle(element).gridColumnStart),
+  )).toEqual(["1", "2", "3", "1", "2", "3"]);
+
+  const boxes = await Promise.all(
+    Array.from({ length: 6 }, (_, index) => items.nth(index).boundingBox()),
+  );
+  const secondRowTops = boxes.slice(3).map((box) => Math.round(box?.y ?? 0));
+  expect(new Set(secondRowTops).size).toBeGreaterThan(1);
+
+  for (let column = 0; column < 3; column += 1) {
+    const first = boxes[column];
+    const next = boxes[column + 3];
+    const gap = (next?.y ?? 0) - (first?.y ?? 0) - (first?.height ?? 0);
+    expect(gap).toBeGreaterThanOrEqual(15);
+    expect(gap).toBeLessThanOrEqual(20);
+  }
+
+  await page.screenshot({ path: testInfo.outputPath("timeline-masonry.png"), fullPage: true });
+});

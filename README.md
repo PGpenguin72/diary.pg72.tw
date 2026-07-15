@@ -115,6 +115,7 @@ flowchart TB
 需求中的「動態排列」定義為 **masonry + editorial collage**，不是純 Pinterest 亂序：
 
 - 年、月、日仍維持清楚的時間軸與閱讀順序。
+- 時間軸卡片使用 Grid masonry 依實際文字高度往上補位，避免一般 grid row 留下大片空隙。
 - 列表卡片只顯示日期、標題、摘要與 metadata，不顯示圖片、影片、錄音或任何媒體預覽。
 - 桌面使用 responsive grid；手機以單欄為主。
 - 卡片版型由持久化的 layout preset 決定，媒體數量不影響卡片寬度，重新整理後不能隨機跳動。

@@ -4,6 +4,7 @@ import { formatMonth, formatNumber } from "../lib/format";
 import { ActivityHeatmap } from "./ActivityHeatmap";
 import { EntryCard } from "./EntryCard";
 import { StatsStrip } from "./StatsStrip";
+import { TimelineMasonry } from "./TimelineMasonry";
 
 interface OverviewViewProps {
   entries: TimelineEntry[];
@@ -86,11 +87,7 @@ export function TimelineView({
         </div>
       </div>
       {entries.length > 0 ? (
-        <div className="entry-grid entry-grid--timeline">
-          {entries.map((entry) => (
-            <EntryCard entry={entry} key={entry.id} onOpen={onOpenEntry} />
-          ))}
-        </div>
+        <TimelineMasonry entries={entries} onOpenEntry={onOpenEntry} />
       ) : (
         <EmptyState title="沒有符合的日記" />
       )}
