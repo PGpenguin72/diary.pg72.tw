@@ -2,7 +2,6 @@ import { AlertCircle, LoaderCircle } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import type { EntryDetail, OverviewResponse, TimelineEntry } from "../shared/api";
 import { AppShell, type AppView } from "./components/AppShell";
-import { EntryDetailDialog } from "./components/EntryDetailDialog";
 import { NewEntryDialog } from "./components/NewEntryDialog";
 import { PageHeader } from "./components/PageHeader";
 import {
@@ -17,6 +16,11 @@ import { createEntry, getEntry, getOverview, getTimeline } from "./lib/api";
 const ImportDialog = lazy(async () => {
   const module = await import("./components/ImportDialog");
   return { default: module.ImportDialog };
+});
+
+const EntryDetailDialog = lazy(async () => {
+  const module = await import("./components/EntryDetailDialog");
+  return { default: module.EntryDetailDialog };
 });
 
 interface AppData {
@@ -185,14 +189,25 @@ export default function App() {
       </main>
 
       {entryLoading || selectedEntry ? (
-        <EntryDetailDialog
-          entry={selectedEntry}
-          loading={entryLoading}
-          onClose={() => {
-            setSelectedEntry(null);
-            setEntryLoading(false);
-          }}
-        />
+        <Suspense
+          fallback={(
+            <div className="dialog-backdrop" role="status">
+              <div className="dialog-loading import-loading">
+                <LoaderCircle aria-hidden="true" className="spin" size={28} />
+                <span>讀取日記</span>
+              </div>
+            </div>
+          )}
+        >
+          <EntryDetailDialog
+            entry={selectedEntry}
+            loading={entryLoading}
+            onClose={() => {
+              setSelectedEntry(null);
+              setEntryLoading(false);
+            }}
+          />
+        </Suspense>
       ) : null}
 
       {showComposer ? (

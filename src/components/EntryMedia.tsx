@@ -35,8 +35,8 @@ export function EntryMedia({
     <img
       src={media.src}
       alt={media.alt}
-      width={media.width ?? 1200}
-      height={media.height ?? 800}
+      width={media.width ?? undefined}
+      height={media.height ?? undefined}
       loading={interactive ? "eager" : "lazy"}
     />
   );

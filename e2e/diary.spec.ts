@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { readFile } from "node:fs/promises";
 import {
   TextReader,
   Uint8ArrayReader,
@@ -25,7 +26,9 @@ const syntheticEntry = `<!doctype html>
   </div>
 </div>
 <div class="title">合成的 Apple Journal 日記</div><div class="bodyText"></span></p>
-<p class="p2"><span class="s2">這是一篇只用於匯入測試的合成內容。</span></p>
+<p class="p2"><span class="s2">### Markdown 小標題</span></p>
+<p class="p2"><span class="s2">這是 **粗體段落**，也有 [測試連結](https://example.com)。</span></p>
+<ul><li>第一個項目</li><li>第二個項目</li></ul>
 <p class="p1"><span class="s1"></div></div></span></p>
 </body></html>`;
 
@@ -43,6 +46,7 @@ const syntheticFtypMedia = new Uint8Array([
 async function syntheticAppleJournalZip(): Promise<Buffer> {
   const output = new Uint8ArrayWriter();
   const writer = new ZipWriter(output);
+  const portraitJpeg = await readFile(new URL("../public/demo/taipei-rain.jpg", import.meta.url));
   await writer.add(
     "AppleJournalEntries/Entries/2024-11-03.html",
     new TextReader(syntheticEntry),
@@ -53,7 +57,7 @@ async function syntheticAppleJournalZip(): Promise<Buffer> {
   );
   await writer.add(
     "AppleJournalEntries/Resources/PHOTO2.png",
-    new Uint8ArrayReader(onePixelPng),
+    new Uint8ArrayReader(portraitJpeg),
   );
   await writer.add(
     "__MACOSX/AppleJournalEntries/Entries/._2024-11-03.html",
@@ -132,6 +136,10 @@ test("@desktop entry, composer, and import surfaces are usable", async ({ page }
   await page.screenshot({ path: testInfo.outputPath("imported-card.png") });
   await importedCard.locator(".entry-card__open").click();
   const importedDetail = page.getByRole("dialog", { name: "合成的 Apple Journal 日記" });
+  await expect(importedDetail.getByRole("heading", { level: 3, name: "Markdown 小標題" })).toBeVisible();
+  await expect(importedDetail.locator("strong")).toHaveText("粗體段落");
+  await expect(importedDetail.getByRole("listitem")).toHaveText(["第一個項目", "第二個項目"]);
+  await expect(importedDetail.getByRole("link", { name: "測試連結" })).toHaveAttribute("href", "https://example.com");
   await expect(importedDetail.locator("video")).toHaveCount(1);
   await expect(importedDetail.locator("audio")).toHaveCount(1);
   await expect(importedDetail.locator("img")).toHaveCount(2);
@@ -141,9 +149,28 @@ test("@desktop entry, composer, and import surfaces are usable", async ({ page }
     return response.headers.get("Content-Type");
   });
   expect(importedImageType).toBe("image/png");
+  const mediaFigures = importedDetail.locator(".entry-dialog__media-grid figure");
+  expect(await mediaFigures.evaluateAll((figures) =>
+    figures.map((figure) => getComputedStyle(figure).gridColumnStart),
+  )).toEqual(["1", "2", "1"]);
+  const squareImageBox = await mediaFigures.nth(0).locator("img").boundingBox();
+  const portraitImageBox = await mediaFigures.nth(1).locator("img").boundingBox();
+  expect(portraitImageBox?.height ?? 0).toBeGreaterThan(squareImageBox?.height ?? 0);
   const proseBox = await importedDetail.locator(".entry-prose").boundingBox();
   const mediaBox = await importedDetail.locator(".entry-dialog__media-grid").boundingBox();
   expect(mediaBox?.y ?? 0).toBeGreaterThanOrEqual((proseBox?.y ?? 0) + (proseBox?.height ?? 0));
+  await importedDetail.getByRole("button", { name: "放大圖片 1" }).click();
+  const lightbox = page.getByRole("dialog", { name: "圖片 1 / 2" });
+  await expect(lightbox).toBeVisible();
+  const firstLightboxSource = await lightbox.locator("img").getAttribute("src");
+  await lightbox.getByTitle("下一張圖片").click();
+  const nextLightbox = page.getByRole("dialog", { name: "圖片 2 / 2" });
+  await expect(nextLightbox.locator("img")).not.toHaveAttribute("src", firstLightboxSource ?? "");
+  await expect.poll(() => page.locator(".media-lightbox").evaluate((element) => getComputedStyle(element).opacity)).toBe("1");
+  await page.screenshot({ path: testInfo.outputPath("media-lightbox.png") });
+  await page.keyboard.press("Escape");
+  await expect(nextLightbox).toBeHidden();
+  await expect(importedDetail).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("imported-media.png") });
   await importedDetail.getByTitle("關閉").click();
   await page.getByPlaceholder("搜尋日記").fill("");
