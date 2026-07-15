@@ -625,66 +625,6 @@ img {
   padding: 28px;
 }
 
-.entry-card[data-has-media="true"] .entry-card__body {
-  padding-bottom: 18px;
-}
-
-.entry-card__gallery {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: 8px;
-  padding: 0 20px 20px;
-}
-
-.entry-card[data-wide="true"] .entry-card__gallery {
-  padding: 0 28px 28px;
-}
-
-.entry-card__gallery figure {
-  position: relative;
-  grid-column: span 2;
-  min-width: 0;
-  aspect-ratio: 4 / 3;
-  margin: 0;
-  overflow: hidden;
-  background: #06080b;
-  border: 1px solid #242a32;
-  border-radius: 4px;
-}
-
-.entry-card__gallery[data-count="1"] figure {
-  grid-column: 2 / span 4;
-}
-
-.entry-card__gallery[data-count="2"] figure,
-.entry-card__gallery[data-count="4"] figure {
-  grid-column: span 3;
-}
-
-.entry-card__gallery[data-count="5"] figure:nth-child(4) {
-  grid-column: 2 / span 2;
-}
-
-.entry-card__gallery img,
-.entry-card__gallery video {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-
-.entry-card__gallery-more {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  color: #f4f6f8;
-  font-size: 21px;
-  font-weight: 750;
-  background: rgba(6, 8, 11, 0.72);
-  backdrop-filter: blur(4px);
-}
-
 .entry-card__date {
   display: flex;
   align-items: center;
@@ -1777,29 +1717,6 @@ img {
 
   .entry-card[data-wide="true"] .entry-card__body {
     padding: 20px;
-  }
-
-  .entry-card[data-wide="true"] .entry-card__gallery {
-    padding: 0 20px 20px;
-  }
-
-  .entry-card__gallery {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 6px;
-  }
-
-  .entry-card__gallery figure,
-  .entry-card__gallery[data-count="1"] figure,
-  .entry-card__gallery[data-count="2"] figure,
-  .entry-card__gallery[data-count="4"] figure,
-  .entry-card__gallery[data-count="5"] figure:nth-child(4) {
-    grid-column: auto;
-  }
-
-  .entry-card__gallery[data-count="1"] figure {
-    grid-column: 1 / -1;
-    width: min(360px, 100%);
-    justify-self: center;
   }
 
   .entry-card[data-wide="true"] h3 {

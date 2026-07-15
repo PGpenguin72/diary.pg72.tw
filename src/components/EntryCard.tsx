@@ -1,7 +1,6 @@
 import { Clock3, Heart, MapPin } from "lucide-react";
 import type { TimelineEntry } from "../../shared/api";
 import { formatEntryDate, formatEntryTime } from "../lib/format";
-import { EntryMedia } from "./EntryMedia";
 
 interface EntryCardProps {
   entry: TimelineEntry;
@@ -9,17 +8,13 @@ interface EntryCardProps {
 }
 
 export function EntryCard({ entry, onOpen }: EntryCardProps) {
-  const visualMedia = entry.media.filter((media) => media.type !== "audio");
-  const previewMedia = visualMedia.slice(0, 6);
-  const remainingMedia = visualMedia.length - previewMedia.length;
-  const isWide = entry.layoutPreset === "film" || visualMedia.length >= 3;
+  const isWide = entry.layoutPreset === "film";
 
   return (
     <article
       className="entry-card"
       data-layout={entry.layoutPreset}
       data-wide={isWide}
-      data-has-media={previewMedia.length > 0}
       style={{ "--journal-color": entry.journalColor } as React.CSSProperties}
     >
       <button
@@ -58,23 +53,6 @@ export function EntryCard({ entry, onOpen }: EntryCardProps) {
           </div>
         ) : null}
       </div>
-
-      {previewMedia.length > 0 ? (
-        <div
-          className="entry-card__gallery"
-          data-count={previewMedia.length}
-          aria-label={`日記媒體，共 ${visualMedia.length} 個`}
-        >
-          {previewMedia.map((media, index) => (
-            <figure key={media.id} data-type={media.type}>
-              <EntryMedia media={media} />
-              {index === previewMedia.length - 1 && remainingMedia > 0 ? (
-                <span className="entry-card__gallery-more">+{remainingMedia}</span>
-              ) : null}
-            </figure>
-          ))}
-        </div>
-      ) : null}
     </article>
   );
 }

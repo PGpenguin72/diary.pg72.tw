@@ -128,13 +128,7 @@ test("@desktop entry, composer, and import surfaces are usable", async ({ page }
   await page.getByPlaceholder("搜尋日記").fill("合成的 Apple Journal 日記");
   await expect(page.getByText("合成的 Apple Journal 日記")).toBeVisible();
   const importedCard = page.locator(".entry-card").filter({ hasText: "合成的 Apple Journal 日記" });
-  const cardGallery = importedCard.locator(".entry-card__gallery");
-  await expect(cardGallery.locator("figure")).toHaveCount(3);
-  await expect(importedCard.getByRole("button", { name: "下一張封面" })).toHaveCount(0);
-  expect(await cardGallery.locator("img").first().evaluate((image) => getComputedStyle(image).objectFit)).toBe("contain");
-  const bodyBox = await importedCard.locator(".entry-card__body").boundingBox();
-  const galleryBox = await cardGallery.boundingBox();
-  expect(galleryBox?.y ?? 0).toBeGreaterThanOrEqual((bodyBox?.y ?? 0) + (bodyBox?.height ?? 0) - 1);
+  await expect(importedCard.locator("img, video, audio, figure")).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("imported-card.png") });
   await importedCard.locator(".entry-card__open").click();
   const importedDetail = page.getByRole("dialog", { name: "合成的 Apple Journal 日記" });
@@ -147,6 +141,9 @@ test("@desktop entry, composer, and import surfaces are usable", async ({ page }
     return response.headers.get("Content-Type");
   });
   expect(importedImageType).toBe("image/png");
+  const proseBox = await importedDetail.locator(".entry-prose").boundingBox();
+  const mediaBox = await importedDetail.locator(".entry-dialog__media-grid").boundingBox();
+  expect(mediaBox?.y ?? 0).toBeGreaterThanOrEqual((proseBox?.y ?? 0) + (proseBox?.height ?? 0));
   await page.screenshot({ path: testInfo.outputPath("imported-media.png") });
   await importedDetail.getByTitle("關閉").click();
   await page.getByPlaceholder("搜尋日記").fill("");
