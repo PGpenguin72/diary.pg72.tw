@@ -5,11 +5,19 @@ import {
   type Entry,
   type FileEntry,
 } from "@zip.js/zip.js";
+import {
+  AppleJournalArchiveError,
+  normalizeArchivePath,
+} from "./archive-safety";
+
+export { AppleJournalArchiveError, normalizeArchivePath } from "./archive-safety";
 
 const MAX_ARCHIVE_FILES = 50_000;
 const MAX_TOTAL_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024 * 1024;
 const MAX_HTML_ENTRY_BYTES = 5 * 1024 * 1024;
-const MAX_TOTAL_HTML_BYTES = 250 * 1024 * 1024;
+const MAX_TOTAL_HTML_BYTES = 32 * 1024 * 1024;
+const MAX_PREVIEW_TEXT_BYTES = 32 * 1024 * 1024;
+const MAX_PREVIEW_ENTRIES = 10_000;
 const MAX_COMPRESSION_RATIO = 500;
 
 const mimeTypes: Record<string, string> = {
@@ -73,28 +81,6 @@ export interface AppleJournalMediaStream {
 export interface AppleJournalMediaReader {
   open(media: AppleJournalMedia, signal?: AbortSignal): Promise<AppleJournalMediaStream>;
   close(): Promise<void>;
-}
-
-export class AppleJournalArchiveError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "AppleJournalArchiveError";
-  }
-}
-
-function normalizeArchivePath(path: string): string {
-  const normalized = path.replaceAll("\\", "/").replace(/^\.\//, "");
-  const parts = normalized.split("/");
-
-  if (
-    normalized.startsWith("/") ||
-    /^[a-z]:\//i.test(normalized) ||
-    parts.some((part) => part === ".." || part.includes("\0"))
-  ) {
-    throw new AppleJournalArchiveError("ZIP 內含不安全的檔案路徑。");
-  }
-
-  return parts.filter((part) => part && part !== ".").join("/");
 }
 
 function isPlatformMetadata(path: string): boolean {
@@ -178,8 +164,9 @@ async function openArchive(file: File): Promise<{
 
     return { reader, entries, filesByPath };
   } catch (error) {
-    await reader.close();
-    throw error;
+    await reader.close().catch(() => undefined);
+    if (error instanceof AppleJournalArchiveError) throw error;
+    throw new AppleJournalArchiveError("ZIP 結構損壞或不完整，無法讀取。");
   }
 }
 
@@ -465,12 +452,16 @@ export async function inspectAppleJournalArchive(file: File): Promise<AppleJourn
     if (htmlEntries.length === 0) {
       throw new AppleJournalArchiveError("找不到 Apple Journal 的 Entries HTML 檔案。");
     }
+    if (htmlEntries.length > MAX_PREVIEW_ENTRIES) {
+      throw new AppleJournalArchiveError("日記篇數超過單次預覽上限，請分批匯入。");
+    }
     const totalHtmlBytes = htmlEntries.reduce((total, [, entry]) => total + entry.uncompressedSize, 0);
     if (totalHtmlBytes > MAX_TOTAL_HTML_BYTES) {
       throw new AppleJournalArchiveError("ZIP 內的日記文字大小異常，已停止解壓縮。");
     }
 
     const parsedEntries: ParsedAppleJournalEntry[] = [];
+    let retainedTextBytes = 0;
     for (const [sourcePath, htmlEntry] of htmlEntries) {
       const parsed = await parseHtmlEntry(
         htmlEntry,
@@ -490,7 +481,28 @@ export async function inspectAppleJournalArchive(file: File): Promise<AppleJourn
           ),
         });
       }
-      parsedEntries.push({ ...parsed, media });
+      const parsedEntry = { ...parsed, media };
+      retainedTextBytes += 2 * [
+        parsedEntry.sourcePath,
+        parsedEntry.title,
+        parsedEntry.body,
+        parsedEntry.occurredAt,
+        parsedEntry.timezone,
+        parsedEntry.localDate,
+        parsedEntry.location ?? "",
+        parsedEntry.mood ?? "",
+        ...parsedEntry.media.flatMap((item) => [
+          item.sourcePath,
+          item.archivePath,
+          item.mimeType,
+          item.fingerprint,
+          item.caption,
+        ]),
+      ].reduce((total, value) => total + value.length, 0);
+      if (retainedTextBytes > MAX_PREVIEW_TEXT_BYTES) {
+        throw new AppleJournalArchiveError("日記預覽內容超過單次記憶體上限，請分批匯入。");
+      }
+      parsedEntries.push(parsedEntry);
     }
 
     parsedEntries.sort((left, right) => left.occurredAt.localeCompare(right.occurredAt));

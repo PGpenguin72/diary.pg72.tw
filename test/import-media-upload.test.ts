@@ -4,7 +4,16 @@ import type {
   StartAppleJournalMediaUploadInput,
   StartAppleJournalMediaUploadResponse,
 } from "../shared/api";
-import { MAX_MEDIA_BYTES, MULTIPART_PART_BYTES } from "../worker/lib/media";
+import {
+  MAX_MEDIA_BYTES,
+  MULTIPART_PART_BYTES,
+  multipartPartCount,
+  multipartPartSize,
+} from "../worker/lib/media";
+import {
+  UPLOAD_BOOKKEEPING_RETENTION_MS,
+  cleanupExpiredMediaUploads,
+} from "../worker/routes/import-media-uploads";
 
 const worker = exports.default;
 const PNG_BYTES = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
@@ -498,10 +507,139 @@ describe("Apple Journal multipart media uploads", () => {
         ? media?.status === "ready"
         : media?.status === "failed",
     ).toBe(true);
+    const item = await env.DB.prepare(`
+      SELECT status FROM import_items WHERE import_id = ?1 AND source_id = ?2
+    `).bind(importId, started.payload.id).first<{ status: string }>();
+    expect(item?.status).toBe(terminal?.status === "completed" ? "completed" : "failed");
 
     const abortAgain = await worker.fetch(new Request(`${uploadUrl}/abort`, { method: "POST" }));
     expect(abortAgain.status).toBe(204);
     expect((await readUploadState(started.payload.id))?.status).toBe(terminal?.status);
+  });
+
+  it("expires an abandoned upload and allows the same media to restart", async () => {
+    const { importId, entryId } = await createImportAndEntry(113);
+    const base = uploadBase(importId, entryId);
+    const input = mediaInput(1_116, PNG_BYTES);
+    const started = await startMediaUpload(base, input);
+    if (started.payload.disposition !== "uploading") throw new Error("Expected an upload session");
+    const cleanupAt = new Date();
+    await env.DB.prepare(`
+      UPDATE media_uploads SET expires_at = ?2 WHERE media_id = ?1
+    `).bind(started.payload.id, new Date(cleanupAt.getTime() - 1).toISOString()).run();
+
+    const result = await cleanupExpiredMediaUploads(env, cleanupAt);
+    expect(result).toMatchObject({ aborted: 1, failed: 0 });
+    expect(await readUploadState(started.payload.id)).toMatchObject({ status: "aborted" });
+    const failedMedia = await env.DB.prepare(`SELECT status FROM media WHERE id = ?1`)
+      .bind(started.payload.id)
+      .first<{ status: string }>();
+    expect(failedMedia?.status).toBe("failed");
+    const failedItem = await env.DB.prepare(`
+      SELECT status, error_code FROM import_items WHERE import_id = ?1 AND source_id = ?2
+    `).bind(importId, started.payload.id).first<{ status: string; error_code: string }>();
+    expect(failedItem).toEqual({ status: "failed", error_code: "UPLOAD_EXPIRED" });
+
+    const restarted = await startMediaUpload(base, input);
+    expect(restarted.response.status).toBe(201);
+    expect(restarted.payload).toMatchObject({ id: started.payload.id, disposition: "uploading" });
+  });
+
+  it("cleanup reconciles an R2 completion left behind before its D1 commit", async () => {
+    const { importId, entryId } = await createImportAndEntry(114);
+    const base = uploadBase(importId, entryId);
+    const input = mediaInput(1_117, PNG_BYTES);
+    const started = await startMediaUpload(base, input);
+    if (started.payload.disposition !== "uploading") throw new Error("Expected an upload session");
+    const uploadUrl = `${base}/${started.payload.id}`;
+    expect((await putPart(`${uploadUrl}/parts/1`, PNG_BYTES, input.mimeType)).status).toBe(201);
+    const state = await readUploadState(started.payload.id);
+    const part = await env.DB.prepare(`
+      SELECT part_number, etag FROM media_upload_parts WHERE media_id = ?1
+    `).bind(started.payload.id).first<{ part_number: number; etag: string }>();
+    if (!state || !part) throw new Error("Expected persisted multipart state");
+    const cleanupAt = new Date();
+    const expiredAt = new Date(cleanupAt.getTime() - 1).toISOString();
+    await env.DB.prepare(`
+      UPDATE media_uploads SET
+        status = 'completing', state_expires_at = ?2,
+        expires_at = ?2, version = version + 1
+      WHERE media_id = ?1 AND status = 'uploading'
+    `).bind(started.payload.id, expiredAt).run();
+    await env.MEDIA
+      .resumeMultipartUpload(state.r2_key, state.upload_id)
+      .complete([{ partNumber: part.part_number, etag: part.etag }]);
+
+    const result = await cleanupExpiredMediaUploads(env, cleanupAt);
+    expect(result).toMatchObject({ finalized: 1, failed: 0 });
+    expect(await readUploadState(started.payload.id)).toMatchObject({ status: "completed" });
+    const completedItem = await env.DB.prepare(`
+      SELECT status FROM import_items WHERE import_id = ?1 AND source_id = ?2
+    `).bind(importId, started.payload.id).first<{ status: string }>();
+    expect(completedItem?.status).toBe("completed");
+    expect((await worker.fetch(new Request(`http://localhost/api/entries/${entryId}`))).status).toBe(200);
+  });
+
+  it("cleanup preserves active leases and removes only old terminal bookkeeping", async () => {
+    const active = await createImportAndEntry(115);
+    const activeBase = uploadBase(active.importId, active.entryId);
+    const activeInput = mediaInput(1_118, PNG_BYTES);
+    const activeStarted = await startMediaUpload(activeBase, activeInput);
+    if (activeStarted.payload.disposition !== "uploading") throw new Error("Expected an upload session");
+    const cleanupAt = new Date();
+    await env.DB.prepare(`
+      UPDATE media_uploads SET
+        status = 'part_uploading', active_part = 1,
+        active_part_expires_at = ?2, expires_at = ?3,
+        version = version + 1
+      WHERE media_id = ?1
+    `).bind(
+      activeStarted.payload.id,
+      new Date(cleanupAt.getTime() + 60_000).toISOString(),
+      new Date(cleanupAt.getTime() - 1).toISOString(),
+    ).run();
+    expect(await cleanupExpiredMediaUploads(env, cleanupAt)).toMatchObject({
+      skipped: 1,
+      aborted: 0,
+    });
+    expect(await readUploadState(activeStarted.payload.id)).toMatchObject({
+      status: "part_uploading",
+      active_part: 1,
+    });
+
+    const completed = await createImportAndEntry(116);
+    const completedBase = uploadBase(completed.importId, completed.entryId);
+    const completedInput = mediaInput(1_119, PNG_BYTES);
+    const completedStarted = await startMediaUpload(completedBase, completedInput);
+    if (completedStarted.payload.disposition !== "uploading") throw new Error("Expected an upload session");
+    const completedUrl = `${completedBase}/${completedStarted.payload.id}`;
+    expect((await putPart(`${completedUrl}/parts/1`, PNG_BYTES, completedInput.mimeType)).status).toBe(201);
+    expect((await worker.fetch(new Request(`${completedUrl}/complete`, { method: "POST" }))).status).toBe(201);
+    await env.DB.prepare(`
+      UPDATE media_uploads SET updated_at = ?2 WHERE media_id = ?1
+    `).bind(
+      completedStarted.payload.id,
+      new Date(cleanupAt.getTime() - UPLOAD_BOOKKEEPING_RETENTION_MS - 1).toISOString(),
+    ).run();
+    const eligible = await env.DB.prepare(`
+      SELECT status, updated_at FROM media_uploads
+      WHERE media_id = ?1 AND status IN ('completed', 'failed', 'aborted')
+        AND updated_at <= ?2
+    `).bind(
+      completedStarted.payload.id,
+      new Date(cleanupAt.getTime() - UPLOAD_BOOKKEEPING_RETENTION_MS).toISOString(),
+    ).first<{ status: string; updated_at: string }>();
+    expect(eligible?.status).toBe("completed");
+
+    const terminalResult = await cleanupExpiredMediaUploads(env, cleanupAt);
+    expect(await readUploadState(completedStarted.payload.id)).toBeNull();
+    expect(terminalResult).toMatchObject({ deleted: 1, failed: 0 });
+    const media = await env.DB.prepare(`SELECT status, r2_key FROM media WHERE id = ?1`)
+      .bind(completedStarted.payload.id)
+      .first<{ status: string; r2_key: string }>();
+    expect(media?.status).toBe("ready");
+    expect((await env.MEDIA.head(media?.r2_key ?? "missing"))?.size).toBe(PNG_BYTES.byteLength);
+    expect((await worker.fetch(new Request(`http://localhost/api/entries/${completed.entryId}`))).status).toBe(200);
   });
 
   it("repairs a legacy failed small-image row instead of misreporting it as a duplicate", async () => {
@@ -539,5 +677,22 @@ describe("Apple Journal multipart media uploads", () => {
     expect(row).toEqual({ owner_subject: "local-development", status: "ready" });
     const object = await env.MEDIA.get(`imports/${mediaId}.png`);
     expect(object?.size).toBe(PNG_BYTES.byteLength);
+  });
+});
+
+describe("multipart geometry", () => {
+  it("models a media file larger than 100 MiB without allocating its contents", () => {
+    const virtualSize = 157 * 1024 * 1024 + 431;
+    const partCount = multipartPartCount(virtualSize);
+    const sizes = Array.from(
+      { length: partCount },
+      (_, index) => multipartPartSize(virtualSize, index + 1),
+    );
+
+    expect(virtualSize).toBeGreaterThan(100 * 1024 * 1024);
+    expect(partCount).toBe(20);
+    expect(sizes.slice(0, -1).every((size) => size === MULTIPART_PART_BYTES)).toBe(true);
+    expect(sizes.at(-1)).toBe(5 * 1024 * 1024 + 431);
+    expect(sizes.reduce((total, size) => total + size, 0)).toBe(virtualSize);
   });
 });

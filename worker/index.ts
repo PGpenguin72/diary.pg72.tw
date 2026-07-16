@@ -4,7 +4,10 @@ import { apiError, noStore } from "./lib/http";
 import { authRoutes } from "./routes/auth";
 import { entryRoutes } from "./routes/entries";
 import { importRoutes } from "./routes/imports";
-import { importMediaUploadRoutes } from "./routes/import-media-uploads";
+import {
+  cleanupExpiredMediaUploads,
+  importMediaUploadRoutes,
+} from "./routes/import-media-uploads";
 import { overviewRoutes } from "./routes/overview";
 
 const app = new Hono<{ Bindings: Env; Variables: AuthVariables }>();
@@ -40,4 +43,18 @@ app.onError((error, context) => {
   return apiError(context, 500, "INTERNAL_ERROR", "暫時無法讀取日記。" );
 });
 
-export default app;
+export default {
+  fetch: (request, env, context) => app.fetch(request, env, context),
+  scheduled: (controller, env, context) => {
+    context.waitUntil(
+      cleanupExpiredMediaUploads(env, new Date(controller.scheduledTime))
+        .then((result) => console.info(JSON.stringify({
+          event: "media_upload_cleanup_completed",
+          ...result,
+        })))
+        .catch(() => console.error(JSON.stringify({
+          event: "media_upload_cleanup_run_failed",
+        }))),
+    );
+  },
+} satisfies ExportedHandler<Env>;

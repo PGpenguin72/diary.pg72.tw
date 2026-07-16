@@ -15,12 +15,16 @@ import {
   MULTIPART_PART_BYTES,
   mediaR2Key,
   mimeTypeMatchesMediaType,
+  multipartPartCount,
+  multipartPartSize,
   validatedMediaBody,
 } from "../lib/media";
 
 const UPLOAD_TTL_MS = 24 * 60 * 60 * 1_000;
 export const PART_UPLOAD_LEASE_MS = 10 * 60 * 1_000;
 export const UPLOAD_STATE_LEASE_MS = 10 * 60 * 1_000;
+export const UPLOAD_BOOKKEEPING_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
+const CLEANUP_BATCH_SIZE = 50;
 // R2 returns an opaque ETag; keep the exact value for complete(), but reject
 // empty, control-character, or unreasonably large values before persistence.
 const ETAG_PATTERN = /^[\x21-\x7e]{1,256}$/;
@@ -77,6 +81,8 @@ interface UploadRow {
   active_part_expires_at: string | null;
   state_expires_at: string | null;
   expires_at: string;
+  updated_at: string;
+  fingerprint: string;
 }
 
 interface PartRow {
@@ -114,6 +120,7 @@ function importItemStatement(
     checksum: string;
     status: "processing" | "completed" | "duplicate" | "failed";
     errorCode?: string | null;
+    requiredUploadStatus?: "completed" | "failed" | "aborted";
     now: string;
   },
 ): D1PreparedStatement {
@@ -121,7 +128,11 @@ function importItemStatement(
     INSERT INTO import_items (
       id, import_id, source_path, source_id, checksum, kind, status,
       error_code, created_at, updated_at
-    ) VALUES (?1, ?2, ?3, ?4, ?5, 'media', ?6, ?7, ?8, ?8)
+    )
+    SELECT ?1, ?2, ?3, ?4, ?5, 'media', ?6, ?7, ?8, ?8
+    WHERE ?9 IS NULL OR EXISTS (
+      SELECT 1 FROM media_uploads WHERE media_id = ?4 AND status = ?9
+    )
     ON CONFLICT(import_id, source_path) DO UPDATE SET
       source_id = excluded.source_id,
       checksum = excluded.checksum,
@@ -138,6 +149,7 @@ function importItemStatement(
     input.status,
     input.errorCode ?? null,
     input.now,
+    input.requiredUploadStatus ?? null,
   );
 }
 
@@ -150,7 +162,8 @@ function uploadRowQuery(database: D1Database, mediaId: string): Promise<UploadRo
       media_uploads.placement, media_uploads.caption, media_uploads.status,
       media_uploads.version, media_uploads.next_part, media_uploads.active_part,
       media_uploads.active_part_expires_at, media_uploads.state_expires_at,
-      media_uploads.expires_at, media.r2_key, media.status AS media_status,
+      media_uploads.expires_at, media_uploads.updated_at,
+      media.r2_key, media.sha256 AS fingerprint, media.status AS media_status,
       media.type, media.mime_type, media.size_bytes
     FROM media_uploads
     JOIN media ON media.id = media_uploads.media_id
@@ -159,8 +172,7 @@ function uploadRowQuery(database: D1Database, mediaId: string): Promise<UploadRo
 }
 
 function expectedPartSize(upload: UploadRow, partNumber: number): number {
-  if (partNumber < upload.part_count) return upload.part_size;
-  return upload.size_bytes - upload.part_size * (upload.part_count - 1);
+  return multipartPartSize(upload.size_bytes, partNumber, upload.part_size);
 }
 
 function uploadMatchesRoute(
@@ -217,6 +229,7 @@ async function finalizeUpload(
       mediaId: upload.media_id,
       checksum: fingerprint,
       status: "completed",
+      requiredUploadStatus: "completed",
       now,
     }),
     reconcileImportedEntryStatement(database, upload.entry_id, now),
@@ -265,7 +278,7 @@ importMediaUploadRoutes.post(
       return apiError(context, 400, "MEDIA_TYPE_MISMATCH", "媒體內容與檔案類型不一致。");
     }
 
-    const partCount = Math.ceil(input.sizeBytes / MULTIPART_PART_BYTES);
+    const partCount = multipartPartCount(input.sizeBytes);
     if (partCount < 1 || partCount > MAX_MULTIPART_PARTS) {
       return apiError(context, 413, "MEDIA_TOO_LARGE", "這個媒體超過目前可接受的大小。");
     }
@@ -656,6 +669,183 @@ importMediaUploadRoutes.post(
   },
 );
 
+export interface MediaUploadCleanupResult {
+  scanned: number;
+  aborted: number;
+  finalized: number;
+  deleted: number;
+  skipped: number;
+  failed: number;
+}
+
+export async function cleanupExpiredMediaUploads(
+  env: Env,
+  now = new Date(),
+): Promise<MediaUploadCleanupResult> {
+  const nowIso = now.toISOString();
+  const terminalCutoff = new Date(
+    now.getTime() - UPLOAD_BOOKKEEPING_RETENTION_MS,
+  ).toISOString();
+  const candidates = await env.DB.prepare(`
+    SELECT media_id
+    FROM media_uploads
+    WHERE
+      (status NOT IN ('completed', 'failed', 'aborted') AND expires_at <= ?1)
+      OR
+      (status IN ('completed', 'failed', 'aborted') AND updated_at <= ?2)
+    ORDER BY updated_at
+    LIMIT ?3
+  `).bind(nowIso, terminalCutoff, CLEANUP_BATCH_SIZE).all<{ media_id: string }>();
+  const result: MediaUploadCleanupResult = {
+    scanned: candidates.results.length,
+    aborted: 0,
+    finalized: 0,
+    deleted: 0,
+    skipped: 0,
+    failed: 0,
+  };
+
+  for (const candidate of candidates.results) {
+    try {
+      const upload = await uploadRowQuery(env.DB, candidate.media_id);
+      if (!upload) {
+        result.skipped += 1;
+        continue;
+      }
+
+      if (upload.status === "completed" || upload.status === "failed" || upload.status === "aborted") {
+        await env.DB.prepare(`
+          DELETE FROM media_uploads
+          WHERE media_id = ?1 AND version = ?2
+            AND status IN ('completed', 'failed', 'aborted')
+            AND updated_at <= ?3
+        `).bind(upload.media_id, upload.version, terminalCutoff).run();
+        if (await uploadRowQuery(env.DB, upload.media_id)) result.skipped += 1;
+        else result.deleted += 1;
+        continue;
+      }
+
+      const partLeaseActive =
+        upload.status === "part_uploading" &&
+        upload.active_part_expires_at !== null &&
+        Date.parse(upload.active_part_expires_at) > now.getTime();
+      const stateLeaseActive =
+        (upload.status === "completing" || upload.status === "aborting") &&
+        upload.state_expires_at !== null &&
+        Date.parse(upload.state_expires_at) > now.getTime();
+      if (partLeaseActive || stateLeaseActive) {
+        result.skipped += 1;
+        continue;
+      }
+
+      if (upload.status === "completing") {
+        const object = await env.MEDIA.head(upload.r2_key);
+        if (object?.size === upload.size_bytes) {
+          if (await finalizeUpload(env.DB, upload, upload.fingerprint)) result.finalized += 1;
+          else result.skipped += 1;
+          continue;
+        }
+      }
+
+      const abortLease = new Date(now.getTime() + UPLOAD_STATE_LEASE_MS).toISOString();
+      const claimed = await env.DB.prepare(`
+        UPDATE media_uploads SET
+          status = 'aborting', active_part = NULL, active_part_expires_at = NULL,
+          state_expires_at = ?5, version = version + 1, updated_at = ?4
+        WHERE media_id = ?1 AND owner_subject = ?2 AND version = ?3
+          AND expires_at <= ?4
+          AND (
+            status = 'uploading'
+            OR (status = 'part_uploading' AND active_part_expires_at <= ?4)
+            OR (status IN ('completing', 'aborting') AND state_expires_at <= ?4)
+          )
+      `).bind(upload.media_id, upload.owner_subject, upload.version, nowIso, abortLease).run();
+      if (claimed.meta.changes !== 1) {
+        result.skipped += 1;
+        continue;
+      }
+      const abortVersion = upload.version + 1;
+      await env.MEDIA
+        .resumeMultipartUpload(upload.r2_key, upload.upload_id)
+        .abort()
+        .catch(() => undefined);
+
+      const completedObject = await env.MEDIA.head(upload.r2_key);
+      if (completedObject?.size === upload.size_bytes) {
+        const completingLease = new Date(now.getTime() + UPLOAD_STATE_LEASE_MS).toISOString();
+        const recovered = await env.DB.prepare(`
+          UPDATE media_uploads SET
+            status = 'completing', state_expires_at = ?5,
+            version = version + 1, updated_at = ?4
+          WHERE media_id = ?1 AND owner_subject = ?2
+            AND version = ?3 AND status = 'aborting'
+        `).bind(
+          upload.media_id,
+          upload.owner_subject,
+          abortVersion,
+          nowIso,
+          completingLease,
+        ).run();
+        if (
+          recovered.meta.changes === 1 &&
+          await finalizeUpload(
+            env.DB,
+            {
+              ...upload,
+              status: "completing",
+              state_expires_at: completingLease,
+              version: abortVersion + 1,
+            },
+            upload.fingerprint,
+          )
+        ) {
+          result.finalized += 1;
+        } else {
+          result.skipped += 1;
+        }
+        continue;
+      }
+
+      const [terminal] = await env.DB.batch([
+        env.DB.prepare(`
+          UPDATE media_uploads SET
+            status = 'aborted', state_expires_at = NULL,
+            version = version + 1, updated_at = ?4
+          WHERE media_id = ?1 AND owner_subject = ?2
+            AND version = ?3 AND status = 'aborting'
+        `).bind(upload.media_id, upload.owner_subject, abortVersion, nowIso),
+        env.DB.prepare(`
+          UPDATE media SET status = 'failed', updated_at = ?2
+          WHERE id = ?1 AND EXISTS (
+            SELECT 1 FROM media_uploads WHERE media_id = ?1 AND status = 'aborted'
+          )
+        `).bind(upload.media_id, nowIso),
+        importItemStatement(env.DB, {
+          importId: upload.import_id,
+          sourcePath: upload.source_path,
+          mediaId: upload.media_id,
+          checksum: upload.fingerprint,
+          status: "failed",
+          errorCode: "UPLOAD_EXPIRED",
+          requiredUploadStatus: "aborted",
+          now: nowIso,
+        }),
+        reconcileImportedEntryStatement(env.DB, upload.entry_id, nowIso),
+      ]);
+      if (terminal.meta.changes === 1) result.aborted += 1;
+      else result.skipped += 1;
+    } catch {
+      result.failed += 1;
+      console.error(JSON.stringify({
+        event: "media_upload_cleanup_failed",
+        mediaId: candidate.media_id,
+      }));
+    }
+  }
+
+  return result;
+}
+
 importMediaUploadRoutes.put(
   "/imports/apple-journal/:importId/entries/:entryId/media/uploads/:mediaId/parts/:partNumber",
   async (context) => {
@@ -1006,6 +1196,7 @@ importMediaUploadRoutes.post(
           checksum: media.sha256,
           status: "failed",
           errorCode: "MEDIA_SIZE_MISMATCH",
+          requiredUploadStatus: "failed",
           now: failedAt,
         }),
       ]);
@@ -1143,6 +1334,7 @@ importMediaUploadRoutes.post(
         checksum: media?.sha256 ?? "0".repeat(64),
         status: "failed",
         errorCode: "UPLOAD_ABORTED",
+        requiredUploadStatus: "aborted",
         now,
       }),
       reconcileImportedEntryStatement(context.env.DB, entryId, now),

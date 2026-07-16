@@ -1,5 +1,6 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
 import { readFile } from "node:fs/promises";
+import { deflateSync } from "node:zlib";
 import type { TimelineResponse } from "../shared/api";
 import {
   TextReader,
@@ -44,13 +45,68 @@ const syntheticFtypMedia = new Uint8Array([
   0x00, 0x00, 0x00, 0x0c, 0x66, 0x74, 0x79, 0x70, 0x71, 0x74, 0x20, 0x20,
 ]);
 
-async function syntheticAppleJournalZip(): Promise<Buffer> {
+function crc32(bytes: Uint8Array): number {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type: string, data: Uint8Array): Buffer {
+  const typeBytes = Buffer.from(type, "ascii");
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(data.byteLength);
+  const checksum = Buffer.alloc(4);
+  checksum.writeUInt32BE(crc32(Buffer.concat([typeBytes, data])));
+  return Buffer.concat([length, typeBytes, data, checksum]);
+}
+
+function syntheticPng(width: number, height: number): Uint8Array {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr.set([8, 6, 0, 0, 0], 8);
+  const rows = Buffer.alloc(height * (1 + width * 4));
+  for (let y = 0; y < height; y += 1) {
+    const rowStart = y * (1 + width * 4);
+    rows[rowStart] = 0;
+    for (let x = 0; x < width; x += 1) {
+      const pixel = rowStart + 1 + x * 4;
+      rows.set([55 + x * 70, 95 + y * 25, 180 - x * 30, 255], pixel);
+    }
+  }
+  return new Uint8Array(Buffer.concat([
+    Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+    pngChunk("IHDR", ihdr),
+    pngChunk("IDAT", deflateSync(rows)),
+    pngChunk("IEND", new Uint8Array()),
+  ]));
+}
+
+async function waitForVisualStability(locator: Locator): Promise<void> {
+  await expect(locator).toBeVisible();
+  await locator.evaluate(async () => document.fonts.ready);
+  await expect.poll(() => locator.evaluate((element) =>
+    element.getAnimations({ subtree: true }).every(
+      (animation) => animation.playState === "finished" || animation.playState === "idle",
+    ),
+  )).toBe(true);
+}
+
+async function syntheticAppleJournalZip(options: {
+  entryHtml?: string;
+  entryFile?: string;
+} = {}): Promise<Buffer> {
   const output = new Uint8ArrayWriter();
   const writer = new ZipWriter(output);
-  const portraitJpeg = await readFile(new URL("../public/demo/taipei-rain.jpg", import.meta.url));
+  const portraitPng = syntheticPng(2, 4);
   await writer.add(
-    "AppleJournalEntries/Entries/2024-11-03.html",
-    new TextReader(syntheticEntry),
+    `AppleJournalEntries/Entries/${options.entryFile ?? "2024-11-03.html"}`,
+    new TextReader(options.entryHtml ?? syntheticEntry),
   );
   await writer.add(
     "AppleJournalEntries/Resources/PHOTO1.jpeg",
@@ -58,7 +114,7 @@ async function syntheticAppleJournalZip(): Promise<Buffer> {
   );
   await writer.add(
     "AppleJournalEntries/Resources/PHOTO2.png",
-    new Uint8ArrayReader(portraitJpeg),
+    new Uint8ArrayReader(portraitPng),
   );
   await writer.add(
     "__MACOSX/AppleJournalEntries/Entries/._2024-11-03.html",
@@ -95,6 +151,7 @@ test("overview renders without horizontal overflow", async ({ page }, testInfo) 
     await expect(page.locator(".sidebar")).toBeVisible();
   }
 
+  await waitForVisualStability(page.locator(".overview-layout"));
   await page.screenshot({
     path: testInfo.outputPath("overview.png"),
     fullPage: true,
@@ -123,10 +180,41 @@ test("@desktop entry, composer, and import surfaces are usable", async ({ page }
   });
   await expect(importDialog.getByText("1 篇日記可以匯入")).toBeVisible();
   await expect(importDialog.getByText("4 個媒體", { exact: false })).toBeVisible();
+  await waitForVisualStability(importDialog);
   await page.screenshot({ path: testInfo.outputPath("import-preview.png") });
+  let markFirstPartReached!: () => void;
+  let releaseFirstPart!: () => void;
+  const firstPartReached = new Promise<void>((resolve) => {
+    markFirstPartReached = resolve;
+  });
+  const firstPartRelease = new Promise<void>((resolve) => {
+    releaseFirstPart = resolve;
+  });
+  let heldFirstPart = false;
+  const partRoute = "**/api/imports/apple-journal/**/parts/*";
+  await page.route(partRoute, async (route) => {
+    if (!heldFirstPart) {
+      heldFirstPart = true;
+      markFirstPartReached();
+      await firstPartRelease;
+    }
+    await route.continue();
+  });
   await importDialog.getByRole("button", { name: "開始匯入" }).click();
+  await firstPartReached;
+  await expect(importDialog.getByRole("progressbar", { name: "整體匯入進度" })).toBeVisible();
+  const fileProgress = importDialog.getByRole("progressbar", { name: "目前媒體上傳進度" });
+  await expect(fileProgress).toBeVisible();
+  await expect(fileProgress).toHaveAttribute("aria-valuemin", "0");
+  await importDialog.locator(".spin").evaluate((element) => {
+    for (const animation of element.getAnimations()) animation.pause();
+  });
+  await page.screenshot({ path: testInfo.outputPath("import-progress.png") });
+  releaseFirstPart();
   await expect(importDialog.getByText("匯入完成")).toBeVisible();
+  await page.unroute(partRoute);
   await expect(importDialog.getByText("1 篇已寫入", { exact: false })).toBeVisible();
+  await waitForVisualStability(importDialog);
   await page.screenshot({ path: testInfo.outputPath("import-complete.png") });
   await importDialog.getByRole("button", { name: "完成" }).click();
 
@@ -134,6 +222,7 @@ test("@desktop entry, composer, and import surfaces are usable", async ({ page }
   await expect(page.getByText("合成的 Apple Journal 日記")).toBeVisible();
   const importedCard = page.locator(".entry-card").filter({ hasText: "合成的 Apple Journal 日記" });
   await expect(importedCard.locator("img, video, audio, figure")).toHaveCount(0);
+  await waitForVisualStability(importedCard);
   await page.screenshot({ path: testInfo.outputPath("imported-card.png") });
   await importedCard.locator(".entry-card__open").click();
   const importedDetail = page.getByRole("dialog", { name: "合成的 Apple Journal 日記" });
@@ -144,6 +233,9 @@ test("@desktop entry, composer, and import surfaces are usable", async ({ page }
   await expect(importedDetail.locator("video")).toHaveCount(1);
   await expect(importedDetail.locator("audio")).toHaveCount(1);
   await expect(importedDetail.locator("img")).toHaveCount(2);
+  await importedDetail.locator("img").evaluateAll(async (images) => {
+    await Promise.all(images.map((element) => (element as HTMLImageElement).decode()));
+  });
   const importedImageType = await importedDetail.locator("img").first().evaluate(async (element) => {
     const image = element as HTMLImageElement;
     const response = await fetch(image.currentSrc);
@@ -167,11 +259,12 @@ test("@desktop entry, composer, and import surfaces are usable", async ({ page }
   await lightbox.getByTitle("下一張圖片").click();
   const nextLightbox = page.getByRole("dialog", { name: "圖片 2 / 2" });
   await expect(nextLightbox.locator("img")).not.toHaveAttribute("src", firstLightboxSource ?? "");
-  await expect.poll(() => page.locator(".media-lightbox").evaluate((element) => getComputedStyle(element).opacity)).toBe("1");
+  await waitForVisualStability(nextLightbox);
   await page.screenshot({ path: testInfo.outputPath("media-lightbox.png") });
   await page.keyboard.press("Escape");
   await expect(nextLightbox).toBeHidden();
   await expect(importedDetail).toBeVisible();
+  await waitForVisualStability(importedDetail);
   await page.screenshot({ path: testInfo.outputPath("imported-media.png") });
   await importedDetail.getByTitle("關閉").click();
   await page.getByPlaceholder("搜尋日記").fill("");
@@ -185,6 +278,97 @@ test("@desktop entry, composer, and import surfaces are usable", async ({ page }
   });
   await repeatedImport.getByRole("button", { name: "開始匯入" }).click();
   await expect(repeatedImport.getByText("0 篇已寫入 · 1 篇重複")).toBeVisible();
+});
+
+test("@desktop partial import exposes itemized failures and a report", async ({ page }, testInfo) => {
+  const failedTitle = "合成的附件失敗日記";
+  const archive = await syntheticAppleJournalZip({
+    entryFile: "2024-11-04.html",
+    entryHtml: syntheticEntry
+      .replace("Sunday, 3 November 2024", "Monday, 4 November 2024")
+      .replace("合成的 Apple Journal 日記", failedTitle),
+  });
+  await page.route("**/api/imports/apple-journal/**/media/uploads", async (route) => {
+    await route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { message: "合成的附件服務暫時無法使用。" } }),
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "匯入" }).click();
+  const importDialog = page.getByRole("dialog", { name: "匯入日記" });
+  await importDialog.locator('input[type="file"]').setInputFiles({
+    name: "SyntheticPartialFailure.zip",
+    mimeType: "application/zip",
+    buffer: archive,
+  });
+  await importDialog.getByRole("button", { name: "開始匯入" }).click();
+  await expect(importDialog.getByText("部分附件尚未完成")).toBeVisible();
+  const failures = importDialog.getByRole("list", { name: "匯入失敗項目" });
+  await expect(failures.getByRole("listitem")).toHaveCount(4);
+  await expect(failures).toContainText(`${failedTitle} · 媒體 1/4`);
+  await expect(failures).toContainText("合成的附件服務暫時無法使用。");
+  await waitForVisualStability(importDialog);
+  await page.screenshot({ path: testInfo.outputPath("import-partial-failure.png") });
+
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    importDialog.getByRole("button", { name: "下載失敗報告" }).click(),
+  ]);
+  expect(download.suggestedFilename()).toBe("pg72-diary-import-failures.json");
+  const reportPath = await download.path();
+  if (!reportPath) throw new Error("Expected a local failure report");
+  const report = JSON.parse(await readFile(reportPath, "utf8")) as {
+    failedCount: number;
+    failures: Array<{ item: string; message: string }>;
+  };
+  expect(report.failedCount).toBe(4);
+  expect(report.failures).toHaveLength(4);
+  expect(report.failures[0]).toMatchObject({
+    item: `${failedTitle} · 媒體 1/4`,
+    message: "合成的附件服務暫時無法使用。",
+  });
+});
+
+test("import error and valid preview stay within the viewport", async ({ page }, testInfo) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "匯入" }).click();
+  const importDialog = page.getByRole("dialog", { name: "匯入日記" });
+  await importDialog.locator('input[type="file"]').setInputFiles({
+    name: "MalformedAppleJournalEntries.zip",
+    mimeType: "application/zip",
+    buffer: Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0x00, 0x00]),
+  });
+  await expect(importDialog.getByText("ZIP 結構損壞或不完整，無法讀取。")).toBeVisible();
+  await waitForVisualStability(importDialog);
+
+  const box = await importDialog.boundingBox();
+  const viewport = page.viewportSize();
+  expect(box).not.toBeNull();
+  expect(viewport).not.toBeNull();
+  expect(box?.x ?? -1).toBeGreaterThanOrEqual(0);
+  expect(box?.y ?? -1).toBeGreaterThanOrEqual(0);
+  expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(viewport?.width ?? 0);
+  expect((box?.y ?? 0) + (box?.height ?? 0)).toBeLessThanOrEqual(viewport?.height ?? 0);
+  expect(await importDialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("import-error.png") });
+
+  await importDialog.locator('input[type="file"]').setInputFiles({
+    name: "SyntheticAppleJournalEntries.zip",
+    mimeType: "application/zip",
+    buffer: await syntheticAppleJournalZip(),
+  });
+  await expect(importDialog.getByText("1 篇日記可以匯入")).toBeVisible();
+  await waitForVisualStability(importDialog);
+  const previewBox = await importDialog.boundingBox();
+  expect(previewBox?.x ?? -1).toBeGreaterThanOrEqual(0);
+  expect(previewBox?.y ?? -1).toBeGreaterThanOrEqual(0);
+  expect((previewBox?.x ?? 0) + (previewBox?.width ?? 0)).toBeLessThanOrEqual(viewport?.width ?? 0);
+  expect((previewBox?.y ?? 0) + (previewBox?.height ?? 0)).toBeLessThanOrEqual(viewport?.height ?? 0);
+  expect(await importDialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("import-ready.png") });
 });
 
 test("@desktop entries can be edited, get attachments, and survive delete with restore", async ({ page }) => {
@@ -325,8 +509,6 @@ test("@desktop timeline cards use ordered masonry columns", async ({ page }, tes
     expect(gap).toBeLessThanOrEqual(20);
   }
 
-  await expect.poll(() => page.locator(".view-section").evaluate((element) =>
-    getComputedStyle(element).opacity,
-  )).toBe("1");
+  await waitForVisualStability(page.locator(".view-section"));
   await page.screenshot({ path: testInfo.outputPath("timeline-masonry.png"), fullPage: true });
 });

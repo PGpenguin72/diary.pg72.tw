@@ -211,8 +211,10 @@ flowchart TD
 - 已實作：每段最多重試三次；D1 保存 opaque R2 ETag 與已完成 part，重新選擇同一 ZIP 可從中斷處繼續。完成、取消與過期 session 都有明確狀態，failed media row 不再被誤判成成功 duplicate。
 - 已實作：part、complete 與 abort 以 D1 version/next-part compare-and-set 互斥；part reservation 有短 lease，Worker 在 R2 寫入前後中止時可由同一 part 安全接管並重寫。R2 已完成但 D1 尚未 finalize 時，以 private object head 重試 reconciliation。
 - 已實作：multipart object key 與 upload ID 只由 Worker 產生及保存，綁定 import、entry 與 PG72 ID `sub`；瀏覽器不能指定任意 R2 key。第一段會再次做 magic-signature / MIME 驗證。
+- 已實作：匯入畫面同時顯示整體 item 進度與目前媒體的 byte / part 進度，提供 ARIA progressbar/live status；部分失敗會逐項列出並可下載 JSON report。
+- 已實作：每日 `03:17 UTC` 的 scheduled handler 分批處理最多 50 個過期 session；active lease 不會被搶走，R2 已完成但 D1 未 finalize 的工作會先 reconciliation，其餘才 abort。`completed` / `failed` / `aborted` bookkeeping 保留 7 天後刪除，不刪 ready media、entry link 或 R2 object。
+- 已實作：單次預覽最多 10,000 篇 entry，HTML 與保留文字各限制 32 MiB；path traversal、絕對路徑、異常壓縮、衝突路徑及損壞 ZIP 都會在匯入前停止並顯示安全錯誤。
 - 待實作：若未來需要減少 Worker 流量，可改用 object-scoped presigned upload；目前不需要 R2 API credential 或跨網域 CORS。
-- 待實作：排程清除 D1 中已 completed / aborted / 過期的 upload bookkeeping。R2 未完成 multipart 預設會自動於 7 天後 abort；重試同一媒體時也會 opportunistic abort 舊 session。
 - 已實作：原始 ZIP 不會送進 Worker 或永久保存，避免同一份媒體占兩倍空間。
 - 待實作：可選的加密原始匯入備份。
 - 每一篇 entry 獨立 commit。某個附件失敗不能讓已完成的數百篇全部 rollback。
@@ -322,7 +324,7 @@ R2 提供 TLS 傳輸加密與 Cloudflare 管理的 AES-256 at-rest encryption，
 
 - Workers/React scaffold、local/preview/production environments
 - PG72 ID OIDC 登入（owner `sub` allowlist）、D1、private R2
-- Apple Journal HTML 一鍵匯入已具備本機可重跑、multipart 續傳與 failed-row 修復；待補完整 reconciliation report 與 production 大檔 smoke
+- Apple Journal HTML 一鍵匯入已具備本機可重跑、multipart 續傳、failed-row 修復、逐項錯誤報告與排程 reconciliation；仍待 production 大檔 smoke
 - timeline、entry viewer、media viewer、calendar、search
 - rich block editor、draft/autosave、日期、位置與標籤
 - 照片、影片、錄音的線上直接上傳

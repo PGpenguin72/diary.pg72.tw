@@ -66,11 +66,23 @@ export function PageHeader({
 
         {canWrite ? (
           <>
-            <button className="button button--secondary" type="button" onClick={onImport}>
+            <button
+              className="button button--secondary"
+              type="button"
+              aria-label="匯入"
+              title="匯入"
+              onClick={onImport}
+            >
               <Upload aria-hidden="true" size={17} />
               <span>匯入</span>
             </button>
-            <button className="button button--primary" type="button" onClick={onNewEntry}>
+            <button
+              className="button button--primary"
+              type="button"
+              aria-label="新增日記"
+              title="新增日記"
+              onClick={onNewEntry}
+            >
               <Plus aria-hidden="true" size={18} />
               <span>新增日記</span>
             </button>
@@ -78,7 +90,13 @@ export function PageHeader({
         ) : null}
 
         {showLogin ? (
-          <button className="button button--secondary" type="button" onClick={onLogin}>
+          <button
+            className="button button--secondary"
+            type="button"
+            aria-label="登入"
+            title="登入"
+            onClick={onLogin}
+          >
             <LogIn aria-hidden="true" size={17} />
             <span>登入</span>
           </button>
@@ -88,6 +106,8 @@ export function PageHeader({
           <button
             className="button button--secondary"
             type="button"
+            aria-label="登出"
+            title="登出"
             disabled={loggingOut}
             onClick={onLogout}
           >

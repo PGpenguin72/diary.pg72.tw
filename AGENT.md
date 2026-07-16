@@ -65,7 +65,7 @@ Apple does not publish a guaranteed stable schema for `AppleJournalEntries` ZIP 
 Required behavior:
 
 - Parse archives incrementally. Never buffer the entire ZIP or a large media file in browser or Worker memory.
-- Large media uploads go directly to R2. Use multipart upload when appropriate.
+- Large media uploads go to R2 through bounded multipart requests. Never buffer or proxy the full file in one browser or Worker request.
 - Make imports resumable and idempotent.
 - Prefer a stable source ID from Apple. When unavailable, derive a deterministic SHA-256 from canonical source fields.
 - Enforce uniqueness for source entries and media hashes.
@@ -100,7 +100,7 @@ Every supported Apple export variant needs a synthetic fixture and regression te
 - Return stable machine-readable error codes plus user-safe messages.
 - Make retryable operations idempotent with operation/import IDs.
 - Stream large request and response bodies. A Worker isolate has limited memory.
-- Do not proxy large browser uploads through the Worker when direct private R2 upload is available.
+- Do not proxy a full large browser upload through one Worker request; use bounded streaming parts or a separately reviewed object-scoped direct upload.
 - Generate thumbnails/preview metadata without overwriting originals. Original media is immutable after successful import unless the user explicitly replaces it.
 
 ## Frontend and interaction rules

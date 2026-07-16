@@ -1,6 +1,7 @@
 import {
   Archive,
   CheckCircle2,
+  Download,
   FileWarning,
   LoaderCircle,
   Upload,
@@ -25,7 +26,8 @@ interface ImportSummary {
   imported: number;
   duplicates: number;
   failed: number;
-  lastError: string | null;
+  failures: Array<{ item: string; message: string }>;
+  unlistedFailures: number;
 }
 
 type ImportState =
@@ -40,6 +42,10 @@ type ImportState =
       total: number;
       label: string;
       stage: "content" | "media";
+      fileBytesCompleted: number;
+      fileBytesTotal: number;
+      filePartsCompleted: number;
+      filePartsTotal: number;
     }
   | { status: "complete"; file: File; preview: AppleJournalArchivePreview; summary: ImportSummary }
   | { status: "error"; file: File; preview?: AppleJournalArchivePreview; message: string };
@@ -47,6 +53,32 @@ type ImportState =
 function errorMessage(error: unknown): string {
   if (error instanceof AppleJournalArchiveError || error instanceof Error) return error.message;
   return "無法讀取這個 Apple Journal ZIP。";
+}
+
+function recordFailure(summary: ImportSummary, item: string, error: unknown): void {
+  summary.failed += 1;
+  if (summary.failures.length < 100) {
+    summary.failures.push({ item, message: errorMessage(error) });
+  } else {
+    summary.unlistedFailures += 1;
+  }
+}
+
+function downloadFailureReport(summary: ImportSummary): void {
+  const report = JSON.stringify({
+    generatedAt: new Date().toISOString(),
+    failedCount: summary.failed,
+    unlistedFailures: summary.unlistedFailures,
+    failures: summary.failures,
+  }, null, 2);
+  const url = URL.createObjectURL(new Blob([report], { type: "application/json" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "pg72-diary-import-failures.json";
+  document.body.append(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 export function ImportDialog({
@@ -89,7 +121,13 @@ export function ImportDialog({
     const mediaOperations = preview.entries.reduce((total, entry) => total + entry.media.length, 0);
     const total = preview.entries.length + mediaOperations;
     let completed = 0;
-    const summary: ImportSummary = { imported: 0, duplicates: 0, failed: 0, lastError: null };
+    const summary: ImportSummary = {
+      imported: 0,
+      duplicates: 0,
+      failed: 0,
+      failures: [],
+      unlistedFailures: 0,
+    };
     const controller = new AbortController();
     importAbortRef.current = controller;
 
@@ -101,6 +139,10 @@ export function ImportDialog({
       total,
       label: "建立匯入工作",
       stage: "content",
+      fileBytesCompleted: 0,
+      fileBytesTotal: 0,
+      filePartsCompleted: 0,
+      filePartsTotal: 0,
     });
 
     try {
@@ -123,6 +165,10 @@ export function ImportDialog({
             total,
             label: entry.title,
             stage: "content",
+            fileBytesCompleted: 0,
+            fileBytesTotal: 0,
+            filePartsCompleted: 0,
+            filePartsTotal: 0,
           });
 
           let importedEntry: Awaited<ReturnType<typeof importAppleJournalEntry>>;
@@ -142,8 +188,7 @@ export function ImportDialog({
             else summary.imported += 1;
           } catch (error) {
             if (controller.signal.aborted) throw error;
-            summary.failed += 1;
-            summary.lastError = errorMessage(error);
+            recordFailure(summary, entry.title, error);
             completed += 1 + entry.media.length;
             continue;
           }
@@ -151,14 +196,19 @@ export function ImportDialog({
           completed += 1;
           for (const [position, media] of entry.media.entries()) {
             controller.signal.throwIfAborted();
+            const mediaLabel = `${entry.title} · 媒體 ${position + 1}/${entry.media.length}`;
             setState({
               status: "importing",
               file,
               preview,
               completed,
               total,
-              label: `${entry.title} · 媒體 ${position + 1}/${entry.media.length}`,
+              label: mediaLabel,
               stage: "media",
+              fileBytesCompleted: 0,
+              fileBytesTotal: media.size,
+              filePartsCompleted: 0,
+              filePartsTotal: Math.max(1, Math.ceil(media.size / (8 * 1024 * 1024))),
             });
 
             try {
@@ -174,14 +224,27 @@ export function ImportDialog({
                 position,
                 placement: position === 0 ? "cover" : "grid",
                 caption: media.caption,
-              }, controller.signal);
+              }, controller.signal, (progress) => {
+                setState({
+                  status: "importing",
+                  file,
+                  preview,
+                  completed,
+                  total,
+                  label: mediaLabel,
+                  stage: "media",
+                  fileBytesCompleted: progress.uploadedBytes,
+                  fileBytesTotal: progress.totalBytes,
+                  filePartsCompleted: progress.uploadedParts,
+                  filePartsTotal: progress.totalParts,
+                });
+              });
               if (importedMedia.disposition !== "duplicate") {
                 await opened.finished;
               }
             } catch (error) {
               if (controller.signal.aborted) throw error;
-              summary.failed += 1;
-              summary.lastError = errorMessage(error);
+              recordFailure(summary, mediaLabel, error);
             }
             completed += 1;
           }
@@ -299,10 +362,43 @@ export function ImportDialog({
               <LoaderCircle aria-hidden="true" className="spin" size={30} />
               <strong>{state.stage === "media" ? "正在儲存媒體" : "正在匯入日記"}</strong>
               <span>{state.label}</span>
-              <div className="import-progress" aria-label={`匯入進度 ${state.completed}/${state.total}`}>
+              <div
+                className="import-progress"
+                role="progressbar"
+                aria-label="整體匯入進度"
+                aria-valuemin={0}
+                aria-valuemax={state.total}
+                aria-valuenow={state.completed}
+                aria-valuetext={`${state.completed} / ${state.total}`}
+              >
                 <span style={{ width: `${state.total ? (state.completed / state.total) * 100 : 0}%` }} />
               </div>
               <small>{state.completed} / {state.total}</small>
+              {state.stage === "media" ? (
+                <div className="import-file-progress">
+                  <div
+                    className="import-progress import-progress--file"
+                    role="progressbar"
+                    aria-label="目前媒體上傳進度"
+                    aria-valuemin={0}
+                    aria-valuemax={state.fileBytesTotal}
+                    aria-valuenow={state.fileBytesCompleted}
+                    aria-valuetext={`${formatBytes(state.fileBytesCompleted)} / ${formatBytes(state.fileBytesTotal)}，${state.filePartsCompleted} / ${state.filePartsTotal} 個分段`}
+                  >
+                    <span
+                      style={{
+                        width: `${state.fileBytesTotal ? (state.fileBytesCompleted / state.fileBytesTotal) * 100 : 0}%`,
+                      }}
+                    />
+                  </div>
+                  <small>
+                    {formatBytes(state.fileBytesCompleted)} / {formatBytes(state.fileBytesTotal)} · {state.filePartsCompleted} / {state.filePartsTotal} 段
+                  </small>
+                </div>
+              ) : null}
+              <p className="sr-only" role="status" aria-live="polite">
+                {state.label}，整體 {state.completed} / {state.total}
+              </p>
               <button
                 className="button button--secondary"
                 type="button"
@@ -327,18 +423,41 @@ export function ImportDialog({
               </span>
               <small>
                 {state.summary.failed
-                  ? state.summary.lastError ?? "重新選擇同一份 ZIP 即可從未完成處繼續。"
+                  ? "重新選擇同一份 ZIP 即可從未完成處繼續。"
                   : "總覽與統計已更新"}
               </small>
+              {state.summary.failures.length ? (
+                <ul className="import-failures" aria-label="匯入失敗項目">
+                  {state.summary.failures.slice(0, 5).map((failure, index) => (
+                    <li key={`${failure.item}-${index}`}>
+                      <strong>{failure.item}</strong>
+                      <span>{failure.message}</span>
+                    </li>
+                  ))}
+                  {state.summary.failed > 5 ? (
+                    <li>另有 {state.summary.failed - 5} 個失敗項目，請下載完整報告。</li>
+                  ) : null}
+                </ul>
+              ) : null}
               <div className="import-actions">
                 {state.summary.failed ? (
-                  <button
-                    className="button button--secondary"
-                    type="button"
-                    onClick={() => void runImport(state.file, state.preview)}
-                  >
-                    重試未完成項目
-                  </button>
+                  <>
+                    <button
+                      className="button button--secondary"
+                      type="button"
+                      onClick={() => downloadFailureReport(state.summary)}
+                    >
+                      <Download aria-hidden="true" size={16} />
+                      下載失敗報告
+                    </button>
+                    <button
+                      className="button button--secondary"
+                      type="button"
+                      onClick={() => void runImport(state.file, state.preview)}
+                    >
+                      重試未完成項目
+                    </button>
+                  </>
                 ) : null}
                 <button className="button button--primary" type="button" onClick={onClose}>
                   完成

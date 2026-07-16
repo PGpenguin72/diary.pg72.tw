@@ -5,6 +5,35 @@ export const MAX_WORKER_UPLOAD_BYTES = 90 * 1024 * 1024;
 export const MULTIPART_PART_BYTES = 8 * 1024 * 1024;
 export const MAX_MULTIPART_PARTS = 10_000;
 
+export function multipartPartCount(
+  sizeBytes: number,
+  partSize = MULTIPART_PART_BYTES,
+): number {
+  return Math.ceil(sizeBytes / partSize);
+}
+
+export function multipartPartSize(
+  sizeBytes: number,
+  partNumber: number,
+  partSize = MULTIPART_PART_BYTES,
+): number {
+  const partCount = multipartPartCount(sizeBytes, partSize);
+  if (
+    !Number.isSafeInteger(sizeBytes) ||
+    sizeBytes <= 0 ||
+    !Number.isSafeInteger(partSize) ||
+    partSize <= 0 ||
+    !Number.isInteger(partNumber) ||
+    partNumber < 1 ||
+    partNumber > partCount
+  ) {
+    return 0;
+  }
+  return partNumber < partCount
+    ? partSize
+    : sizeBytes - partSize * (partCount - 1);
+}
+
 /** One media row joined with its entry_media link, as read for API previews. */
 export interface EntryMediaRow {
   id: string;

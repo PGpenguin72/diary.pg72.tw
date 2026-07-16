@@ -23,6 +23,9 @@
       "custom_domain": true
     }
   ],
+  "triggers": {
+    "crons": ["17 3 * * *"]
+  },
   "d1_databases": [
     {
       "binding": "DB",

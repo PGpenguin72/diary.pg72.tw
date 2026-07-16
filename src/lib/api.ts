@@ -51,6 +51,13 @@ export class ApiRequestError extends Error {
   }
 }
 
+export interface MediaUploadProgress {
+  uploadedBytes: number;
+  totalBytes: number;
+  uploadedParts: number;
+  totalParts: number;
+}
+
 async function readErrorMessage(response: Response): Promise<string> {
   let message = "暫時無法完成這個動作。";
 
@@ -257,6 +264,7 @@ export function importAppleJournalMedia(
     caption: string;
   },
   signal?: AbortSignal,
+  onProgress?: (progress: MediaUploadProgress) => void,
 ): Promise<ImportAppleJournalMediaResponse> {
   return uploadAppleJournalMediaMultipart(importId, entryId, {
     fingerprint: media.fingerprint,
@@ -267,10 +275,11 @@ export function importAppleJournalMedia(
     position: media.position,
     placement: media.placement,
     caption: media.caption,
-  }, media.stream, signal);
+  }, media.stream, signal, onProgress);
 }
 
 const MEDIA_PART_ATTEMPTS = 3;
+const MEDIA_UPLOAD_PART_BYTES = 8 * 1024 * 1024;
 
 function mediaUploadBaseUrl(importId: string, entryId: string): string {
   return `/api/imports/apple-journal/${encodeURIComponent(importId)}/entries/${encodeURIComponent(entryId)}/media/uploads`;
@@ -389,6 +398,7 @@ async function uploadAppleJournalMediaMultipart(
   input: StartAppleJournalMediaUploadInput,
   stream: ReadableStream<Uint8Array>,
   signal?: AbortSignal,
+  onProgress?: (progress: MediaUploadProgress) => void,
 ): Promise<ImportAppleJournalMediaResponse> {
   const baseUrl = mediaUploadBaseUrl(importId, entryId);
   const partReader = new MediaStreamPartReader(stream);
@@ -406,7 +416,16 @@ async function uploadAppleJournalMediaMultipart(
         signal,
       },
     );
-    if (started.disposition === "duplicate") return started;
+    if (started.disposition === "duplicate") {
+      const totalParts = Math.ceil(input.sizeBytes / MEDIA_UPLOAD_PART_BYTES);
+      onProgress?.({
+        uploadedBytes: input.sizeBytes,
+        totalBytes: input.sizeBytes,
+        uploadedParts: totalParts,
+        totalParts,
+      });
+      return started;
+    }
 
     const uploadUrl = `${baseUrl}/${encodeURIComponent(started.id)}`;
     const abortUrl = `${uploadUrl}/abort`;
@@ -418,6 +437,19 @@ async function uploadAppleJournalMediaMultipart(
       }).catch(() => undefined);
     };
     const uploadedParts = new Set(started.uploadedParts);
+    let uploadedBytes = [...uploadedParts].reduce((total, partNumber) => {
+      const bytes = partNumber < started.partCount
+        ? started.partSize
+        : input.sizeBytes - started.partSize * (started.partCount - 1);
+      return total + Math.max(0, bytes);
+    }, 0);
+    const reportProgress = () => onProgress?.({
+      uploadedBytes,
+      totalBytes: input.sizeBytes,
+      uploadedParts: uploadedParts.size,
+      totalParts: started.partCount,
+    });
+    reportProgress();
     handlePageHide = () => abortUpload();
     handleAbort = () => abortUpload();
     window.addEventListener("pagehide", handlePageHide, { once: true });
@@ -437,6 +469,9 @@ async function uploadAppleJournalMediaMultipart(
         part,
         signal,
       );
+      uploadedParts.add(partNumber);
+      uploadedBytes += part.size;
+      reportProgress();
     }
     await partReader.expectEnd();
 
