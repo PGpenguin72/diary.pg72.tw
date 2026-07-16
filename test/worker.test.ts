@@ -233,6 +233,91 @@ describe("diary Worker API", () => {
     );
   });
 
+  it("publishes a first-time text-only import and keeps retries idempotent", async () => {
+    const startResponse = await exports.default.fetch(
+      new Request("http://localhost/api/imports/apple-journal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fileName: "SyntheticTextOnly.zip",
+          fileFingerprint: "d".repeat(64),
+          entryCount: 1,
+          mediaCount: 0,
+        }),
+      }),
+    );
+    expect(startResponse.status).toBe(201);
+    const importJob = await startResponse.json<{ id: string }>();
+    const entryInput = {
+      sourcePath: "Synthetic/Entries/text-only.html",
+      mediaCount: 0,
+      title: "合成純文字日記",
+      body: "這篇測試日記沒有附件。",
+      occurredAt: "2026-07-17T00:00:00.000Z",
+      timezone: "Asia/Taipei",
+      localDate: "2026-07-17",
+      location: null,
+      mood: null,
+    };
+    const importEntry = async () => {
+      const response = await exports.default.fetch(
+        new Request(`http://localhost/api/imports/apple-journal/${importJob.id}/entries`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(entryInput),
+        }),
+      );
+      return {
+        response,
+        body: await response.json<{
+          id: string;
+          generationId: string;
+          disposition: "inserted" | "updated" | "duplicate";
+        }>(),
+      };
+    };
+
+    const first = await importEntry();
+    expect(first.response.status).toBe(201);
+    expect(first.body.disposition).toBe("inserted");
+    expect(
+      (await exports.default.fetch(
+        new Request(`https://diary.pg72.tw/api/entries/${first.body.id}`),
+      )).status,
+    ).toBe(200);
+    expect(
+      await env.DB.prepare(`
+        SELECT entries.status, entry_import_generations.expected_media_count
+        FROM entries
+        JOIN entry_import_generations ON entry_import_generations.entry_id = entries.id
+        WHERE entries.id = ?1
+      `).bind(first.body.id).first(),
+    ).toEqual({ status: "published", expected_media_count: 0 });
+
+    const retry = await importEntry();
+    expect(retry.response.status).toBe(200);
+    expect(retry.body).toMatchObject({ id: first.body.id, disposition: "duplicate" });
+    expect(retry.body.generationId).not.toBe(first.body.generationId);
+    expect(
+      (await exports.default.fetch(
+        new Request(`https://diary.pg72.tw/api/entries/${retry.body.id}`),
+      )).status,
+    ).toBe(200);
+    const rows = await env.DB.prepare(`
+      SELECT id, import_generation_id, status FROM entries
+      WHERE source = 'apple_journal' AND source_id = ?1
+    `).bind(entryInput.sourcePath).all<{
+      id: string;
+      import_generation_id: string;
+      status: string;
+    }>();
+    expect(rows.results).toEqual([{
+      id: first.body.id,
+      import_generation_id: retry.body.generationId,
+      status: "published",
+    }]);
+  });
+
   it("keeps a changed re-import private until current-generation media reconciles", async () => {
     const startResponse = await exports.default.fetch(
       new Request("http://localhost/api/imports/apple-journal", {

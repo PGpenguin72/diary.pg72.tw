@@ -410,6 +410,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
         status: "completed",
         now,
       }),
+      ...reconcileImportedEntryStatements(context.env.DB, entryId, generationId, now),
     ]);
   }
 
