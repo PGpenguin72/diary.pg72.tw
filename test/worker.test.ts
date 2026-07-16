@@ -1,4 +1,4 @@
-import { exports } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 
 describe("diary Worker API", () => {
@@ -146,7 +146,11 @@ describe("diary Worker API", () => {
         body: entryBody,
       }),
     );
-    const imported = await entryResponse.json<{ id: string; disposition: string }>();
+    const imported = await entryResponse.json<{
+      id: string;
+      generationId: string;
+      disposition: string;
+    }>();
     expect(entryResponse.status).toBe(201);
     expect(imported.disposition).toBe("inserted");
 
@@ -158,7 +162,7 @@ describe("diary Worker API", () => {
     const mediaFingerprint = "b".repeat(64);
     const mediaResponse = await exports.default.fetch(
       new Request(
-        `http://localhost/api/imports/apple-journal/${importJob.id}/entries/${imported.id}/media?sourcePath=AppleJournalEntries%2FResources%2Fphoto.png&type=photo&position=0&placement=cover&caption=`,
+        `http://localhost/api/imports/apple-journal/${importJob.id}/entries/${imported.id}/media?generationId=${encodeURIComponent(imported.generationId)}&sourcePath=AppleJournalEntries%2FResources%2Fphoto.png&type=photo&position=0&placement=cover&caption=`,
         {
           method: "POST",
           headers: {
@@ -184,9 +188,32 @@ describe("diary Worker API", () => {
         body: entryBody,
       }),
     );
-    const duplicate = await duplicateResponse.json<{ id: string; disposition: string }>();
+    const duplicate = await duplicateResponse.json<{
+      id: string;
+      generationId: string;
+      disposition: string;
+    }>();
     expect(duplicate.id).toBe(imported.id);
     expect(duplicate.disposition).toBe("duplicate");
+
+    expect(
+      (await exports.default.fetch(new Request(`http://localhost/api/entries/${imported.id}`))).status,
+    ).toBe(404);
+    const reusedMedia = await exports.default.fetch(
+      new Request(
+        `http://localhost/api/imports/apple-journal/${importJob.id}/entries/${imported.id}/media?generationId=${encodeURIComponent(duplicate.generationId)}&sourcePath=AppleJournalEntries%2FResources%2Fphoto.png&type=photo&position=0&placement=cover&caption=`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "image/png",
+            "Content-Length": "8",
+            "X-Media-Fingerprint": mediaFingerprint,
+          },
+          body: new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+        },
+      ),
+    );
+    expect(reusedMedia.status).toBe(200);
 
     const entryDetailResponse = await exports.default.fetch(
       new Request(`http://localhost/api/entries/${imported.id}`),
@@ -203,5 +230,149 @@ describe("diary Worker API", () => {
     expect(new Uint8Array(await storedMediaResponse.arrayBuffer())).toEqual(
       new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
     );
+  });
+
+  it("keeps a changed re-import private until current-generation media reconciles", async () => {
+    const startResponse = await exports.default.fetch(
+      new Request("http://localhost/api/imports/apple-journal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fileName: "SyntheticChangedImport.zip",
+          fileFingerprint: "c".repeat(64),
+          entryCount: 1,
+          mediaCount: 1,
+        }),
+      }),
+    );
+    const importJob = await startResponse.json<{ id: string }>();
+    const entryInput = {
+      sourcePath: "Synthetic/Entries/changed.html",
+      mediaCount: 1,
+      title: "合成的第一版日記",
+      body: "第一版合成內容。",
+      occurredAt: "2026-07-17T00:00:00.000Z",
+      timezone: "Asia/Taipei",
+      localDate: "2026-07-17",
+      location: null,
+      mood: null,
+    };
+    const postEntry = async (input: typeof entryInput) => {
+      const response = await exports.default.fetch(
+        new Request(`http://localhost/api/imports/apple-journal/${importJob.id}/entries`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(input),
+        }),
+      );
+      return {
+        response,
+        body: await response.json<{
+          id: string;
+          generationId: string;
+          disposition: "inserted" | "updated" | "duplicate";
+        }>(),
+      };
+    };
+    const uploadMedia = (
+      entryId: string,
+      generationId: string,
+      fingerprint: string,
+      sourcePath: string,
+      bytes: Uint8Array,
+    ) => exports.default.fetch(
+      new Request(
+        `http://localhost/api/imports/apple-journal/${importJob.id}/entries/${entryId}/media?generationId=${encodeURIComponent(generationId)}&sourcePath=${encodeURIComponent(sourcePath)}&type=photo&position=0&placement=cover&caption=`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "image/png",
+            "Content-Length": String(bytes.byteLength),
+            "X-Media-Fingerprint": fingerprint,
+          },
+          body: bytes,
+        },
+      ),
+    );
+    const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+
+    const first = await postEntry(entryInput);
+    expect(first.response.status).toBe(201);
+    expect(
+      (await uploadMedia(
+        first.body.id,
+        first.body.generationId,
+        "1".repeat(64),
+        "Synthetic/Resources/old.png",
+        png,
+      )).status,
+    ).toBe(201);
+    expect(
+      (await exports.default.fetch(new Request(`http://localhost/api/entries/${first.body.id}`))).status,
+    ).toBe(200);
+
+    const changedInput = {
+      ...entryInput,
+      title: "合成的第二版日記",
+      body: "第二版合成內容。",
+    };
+    const changed = await postEntry(changedInput);
+    expect(changed.response.status).toBe(200);
+    expect(changed.body.disposition).toBe("updated");
+    expect(changed.body.generationId).not.toBe(first.body.generationId);
+    expect(
+      (await exports.default.fetch(new Request(`https://diary.pg72.tw/api/entries/${first.body.id}`))).status,
+    ).toBe(404);
+    const oldLink = await env.DB.prepare(`
+      SELECT import_generation_id FROM entry_media WHERE entry_id = ?1
+    `).bind(first.body.id).first<{ import_generation_id: string }>();
+    expect(oldLink?.import_generation_id).toBe(first.body.generationId);
+
+    const malformed = await uploadMedia(
+      first.body.id,
+      changed.body.generationId,
+      "2".repeat(64),
+      "Synthetic/Resources/new.png",
+      new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7]),
+    );
+    expect(malformed.status).toBe(400);
+    expect(
+      (await exports.default.fetch(new Request(`http://localhost/api/entries/${first.body.id}`))).status,
+    ).toBe(404);
+
+    const retry = await postEntry(changedInput);
+    expect(retry.body.disposition).toBe("duplicate");
+    expect(retry.body.generationId).not.toBe(changed.body.generationId);
+    expect(
+      (await uploadMedia(
+        first.body.id,
+        changed.body.generationId,
+        "2".repeat(64),
+        "Synthetic/Resources/new.png",
+        png,
+      )).status,
+    ).toBe(409);
+    expect(
+      (await uploadMedia(
+        first.body.id,
+        retry.body.generationId,
+        "2".repeat(64),
+        "Synthetic/Resources/new.png",
+        png,
+      )).status,
+    ).toBe(201);
+
+    const visible = await exports.default.fetch(
+      new Request(`https://diary.pg72.tw/api/entries/${first.body.id}`),
+    );
+    expect(visible.status).toBe(200);
+    const detail = await visible.json<{ title: string; media: Array<{ id: string }> }>();
+    expect(detail.title).toBe(changedInput.title);
+    expect(detail.media).toHaveLength(1);
+    const currentLinks = await env.DB.prepare(`
+      SELECT import_generation_id FROM entry_media
+      WHERE entry_id = ?1 AND import_generation_id = ?2
+    `).bind(first.body.id, retry.body.generationId).all<{ import_generation_id: string }>();
+    expect(currentLinks.results).toHaveLength(1);
   });
 });

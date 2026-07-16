@@ -144,6 +144,7 @@ export const startAppleJournalImportResponseSchema = z.object({
 
 export const importAppleJournalEntryResponseSchema = z.object({
   id: z.string(),
+  generationId: z.uuid(),
   disposition: z.enum(["inserted", "updated", "duplicate"]),
 }) satisfies z.ZodType<ImportAppleJournalEntryResponse>;
 

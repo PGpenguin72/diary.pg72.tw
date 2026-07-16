@@ -143,6 +143,7 @@ export interface ImportAppleJournalEntryInput {
 
 export interface ImportAppleJournalEntryResponse {
   id: string;
+  generationId: string;
   disposition: "inserted" | "updated" | "duplicate";
 }
 
@@ -152,6 +153,7 @@ export interface ImportAppleJournalMediaResponse {
 }
 
 export interface StartAppleJournalMediaUploadInput {
+  generationId: string;
   fingerprint: string;
   sourcePath: string;
   type: MediaType;

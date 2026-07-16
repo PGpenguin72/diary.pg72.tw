@@ -30,6 +30,7 @@ const CLEANUP_BATCH_SIZE = 50;
 const ETAG_PATTERN = /^[\x21-\x7e]{1,256}$/;
 
 const startUploadSchema = z.object({
+  generationId: z.uuid(),
   fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
   sourcePath: z.string().trim().min(1).max(1_000),
   type: z.enum(["photo", "video", "audio", "drawing"]),
@@ -54,6 +55,7 @@ interface UploadRow {
   media_id: string;
   import_id: string;
   entry_id: string;
+  entry_generation_id: string;
   owner_subject: string;
   source_path: string;
   upload_id: string;
@@ -157,6 +159,7 @@ function uploadRowQuery(database: D1Database, mediaId: string): Promise<UploadRo
   return database.prepare(`
     SELECT
       media_uploads.media_id, media_uploads.import_id, media_uploads.entry_id,
+      media_uploads.entry_generation_id,
       media_uploads.owner_subject, media_uploads.source_path, media_uploads.upload_id,
       media_uploads.part_size, media_uploads.part_count, media_uploads.position,
       media_uploads.placement, media_uploads.caption, media_uploads.status,
@@ -177,12 +180,48 @@ function expectedPartSize(upload: UploadRow, partNumber: number): number {
 
 function uploadMatchesRoute(
   upload: UploadRow,
-  input: { importId: string; entryId: string; owner: string },
+  input: { importId: string; entryId: string; owner: string; generationId?: string },
 ): boolean {
   return (
     upload.import_id === input.importId &&
     upload.entry_id === input.entryId &&
-    upload.owner_subject === input.owner
+    upload.owner_subject === input.owner &&
+    (input.generationId === undefined || upload.entry_generation_id === input.generationId)
+  );
+}
+
+function importedMediaLinkStatement(
+  database: D1Database,
+  input: {
+    entryId: string;
+    generationId: string;
+    mediaId: string;
+    position: number;
+    placement: "inline" | "grid" | "cover";
+    caption: string;
+  },
+): D1PreparedStatement {
+  return database.prepare(`
+    INSERT INTO entry_media (
+      entry_id, media_id, position, placement, caption, import_generation_id
+    )
+    SELECT ?1, ?3, ?4, ?5, ?6, ?2
+    WHERE EXISTS (
+      SELECT 1 FROM entries
+      WHERE id = ?1 AND source = 'apple_journal' AND import_generation_id = ?2
+    )
+    ON CONFLICT(entry_id, media_id) DO UPDATE SET
+      position = excluded.position,
+      placement = excluded.placement,
+      caption = excluded.caption,
+      import_generation_id = excluded.import_generation_id
+  `).bind(
+    input.entryId,
+    input.generationId,
+    input.mediaId,
+    input.position,
+    input.placement,
+    input.caption,
   );
 }
 
@@ -207,22 +246,14 @@ async function finalizeUpload(
         WHERE media_id = ?1 AND status = 'completed'
       )
     `).bind(upload.media_id, now),
-    database.prepare(`
-      INSERT OR IGNORE INTO entry_media (
-        entry_id, media_id, position, placement, caption
-      )
-      SELECT ?1, ?2, ?3, ?4, ?5
-      WHERE EXISTS (
-        SELECT 1 FROM media_uploads
-        WHERE media_id = ?2 AND status = 'completed'
-      )
-    `).bind(
-      upload.entry_id,
-      upload.media_id,
-      upload.position,
-      upload.placement,
-      upload.caption,
-    ),
+    importedMediaLinkStatement(database, {
+      entryId: upload.entry_id,
+      generationId: upload.entry_generation_id,
+      mediaId: upload.media_id,
+      position: upload.position,
+      placement: upload.placement,
+      caption: upload.caption,
+    }),
     importItemStatement(database, {
       importId: upload.import_id,
       sourcePath: upload.source_path,
@@ -232,7 +263,7 @@ async function finalizeUpload(
       requiredUploadStatus: "completed",
       now,
     }),
-    reconcileImportedEntryStatement(database, upload.entry_id, now),
+    reconcileImportedEntryStatement(database, upload.entry_id, upload.entry_generation_id, now),
   ]);
 
   const completed = await uploadRowQuery(database, upload.media_id);
@@ -290,8 +321,9 @@ importMediaUploadRoutes.post(
         .bind(importId)
         .first<{ id: string }>(),
       context.env.DB.prepare(`
-        SELECT id FROM entries WHERE id = ?1 AND source = 'apple_journal'
-      `).bind(entryId).first<{ id: string }>(),
+        SELECT id, import_generation_id FROM entries
+        WHERE id = ?1 AND source = 'apple_journal'
+      `).bind(entryId).first<{ id: string; import_generation_id: string | null }>(),
       context.env.DB.prepare(`
         SELECT id, r2_key, owner_subject, status, type, mime_type, size_bytes
         FROM media WHERE sha256 = ?1
@@ -299,6 +331,9 @@ importMediaUploadRoutes.post(
     ]);
     if (!importJob) return apiError(context, 404, "IMPORT_NOT_FOUND", "找不到這次匯入工作。");
     if (!entry) return apiError(context, 404, "ENTRY_NOT_FOUND", "找不到這篇匯入日記。");
+    if (entry.import_generation_id !== input.generationId) {
+      return apiError(context, 409, "ENTRY_IMPORT_GENERATION_CHANGED", "這篇日記已有更新的匯入工作，請重新開始。");
+    }
     if (existing?.owner_subject && existing.owner_subject !== owner) {
       return apiError(context, 409, "MEDIA_FINGERPRINT_CONFLICT", "這個媒體識別碼已被其他資料使用。");
     }
@@ -322,11 +357,14 @@ importMediaUploadRoutes.post(
         context.env.DB.prepare(`
           UPDATE media SET owner_subject = ?2, updated_at = ?3 WHERE id = ?1
         `).bind(existing.id, owner, now),
-        context.env.DB.prepare(`
-          INSERT OR IGNORE INTO entry_media (
-            entry_id, media_id, position, placement, caption
-          ) VALUES (?1, ?2, ?3, ?4, ?5)
-        `).bind(entryId, existing.id, input.position, input.placement, input.caption),
+        importedMediaLinkStatement(context.env.DB, {
+          entryId,
+          generationId: input.generationId,
+          mediaId: existing.id,
+          position: input.position,
+          placement: input.placement,
+          caption: input.caption,
+        }),
         importItemStatement(context.env.DB, {
           importId,
           sourcePath: input.sourcePath,
@@ -335,7 +373,7 @@ importMediaUploadRoutes.post(
           status: "duplicate",
           now,
         }),
-        reconcileImportedEntryStatement(context.env.DB, entryId, now),
+        reconcileImportedEntryStatement(context.env.DB, entryId, input.generationId, now),
       ]);
       const response: StartAppleJournalMediaUploadResponse = {
         id: existing.id,
@@ -356,7 +394,10 @@ importMediaUploadRoutes.post(
               status = 'completing', active_part = NULL, active_part_expires_at = NULL,
               state_expires_at = ?5, version = version + 1, updated_at = ?4
             WHERE media_id = ?1 AND owner_subject = ?2 AND version = ?3
-              AND status IN ('uploading', 'part_uploading', 'completing')
+              AND (
+                status IN ('uploading', 'completing')
+                OR (status = 'part_uploading' AND active_part_expires_at <= ?4)
+              )
           `).bind(
             existing.id,
             owner,
@@ -378,34 +419,34 @@ importMediaUploadRoutes.post(
           }
         }
 
-        if (currentUpload) {
-          if (currentUpload.status !== "completed") {
-            const finalized = await finalizeUpload(context.env.DB, currentUpload, input.fingerprint);
-            if (!finalized) {
-              return apiError(context, 409, "MEDIA_UPLOAD_BUSY", "媒體正在由另一個上傳工作處理。");
-            }
+        if (currentUpload && currentUpload.status !== "completed") {
+          const finalized = await finalizeUpload(context.env.DB, currentUpload, input.fingerprint);
+          if (!finalized) {
+            return apiError(context, 409, "MEDIA_UPLOAD_BUSY", "媒體正在由另一個上傳工作處理。");
           }
-        } else {
-          await context.env.DB.batch([
-            context.env.DB.prepare(`
-              UPDATE media SET owner_subject = ?2, status = 'ready', updated_at = ?3 WHERE id = ?1
-            `).bind(existing.id, owner, now),
-            context.env.DB.prepare(`
-              INSERT OR IGNORE INTO entry_media (
-                entry_id, media_id, position, placement, caption
-              ) VALUES (?1, ?2, ?3, ?4, ?5)
-            `).bind(entryId, existing.id, input.position, input.placement, input.caption),
-            importItemStatement(context.env.DB, {
-              importId,
-              sourcePath: input.sourcePath,
-              mediaId: existing.id,
-              checksum: input.fingerprint,
-              status: "duplicate",
-              now,
-            }),
-            reconcileImportedEntryStatement(context.env.DB, entryId, now),
-          ]);
         }
+        await context.env.DB.batch([
+          context.env.DB.prepare(`
+            UPDATE media SET owner_subject = ?2, status = 'ready', updated_at = ?3 WHERE id = ?1
+          `).bind(existing.id, owner, now),
+          importedMediaLinkStatement(context.env.DB, {
+            entryId,
+            generationId: input.generationId,
+            mediaId: existing.id,
+            position: input.position,
+            placement: input.placement,
+            caption: input.caption,
+          }),
+          importItemStatement(context.env.DB, {
+            importId,
+            sourcePath: input.sourcePath,
+            mediaId: existing.id,
+            checksum: input.fingerprint,
+            status: "duplicate",
+            now,
+          }),
+          reconcileImportedEntryStatement(context.env.DB, entryId, input.generationId, now),
+        ]);
         const response: StartAppleJournalMediaUploadResponse = {
           id: existing.id,
           disposition: "duplicate",
@@ -427,7 +468,7 @@ importMediaUploadRoutes.post(
 
       if (
         currentUpload &&
-        uploadMatchesRoute(currentUpload, { importId, entryId, owner }) &&
+        uploadMatchesRoute(currentUpload, { importId, entryId, owner, generationId: input.generationId }) &&
         currentUpload.source_path === input.sourcePath &&
         (currentUpload.status === "uploading" || currentUpload.status === "part_uploading") &&
         Date.parse(currentUpload.expires_at) > Date.now()
@@ -450,12 +491,22 @@ importMediaUploadRoutes.post(
         currentUpload.status !== "failed" &&
         currentUpload.status !== "aborted"
       ) {
+        if (
+          currentUpload.status === "part_uploading" &&
+          currentUpload.active_part_expires_at !== null &&
+          Date.parse(currentUpload.active_part_expires_at) > Date.now()
+        ) {
+          return apiError(context, 409, "MEDIA_UPLOAD_BUSY", "媒體分段仍在上傳，請稍後重試。");
+        }
         const claimed = await context.env.DB.prepare(`
           UPDATE media_uploads SET
             status = 'aborting', active_part = NULL, active_part_expires_at = NULL,
             state_expires_at = ?5, version = version + 1, updated_at = ?4
           WHERE media_id = ?1 AND owner_subject = ?2 AND version = ?3
-            AND status IN ('uploading', 'part_uploading')
+            AND (
+              status = 'uploading'
+              OR (status = 'part_uploading' AND active_part_expires_at <= ?4)
+            )
         `).bind(
           existing.id,
           owner,
@@ -495,6 +546,7 @@ importMediaUploadRoutes.post(
             context.env.DB.prepare(`
               UPDATE media_uploads SET
                 import_id = ?2, entry_id = ?3, owner_subject = ?4, source_path = ?5,
+                entry_generation_id = ?15,
                 upload_id = ?6, part_size = ?7, part_count = ?8, position = ?9,
                 placement = ?10, caption = ?11, status = 'uploading',
                 version = version + 1, next_part = 1, active_part = NULL,
@@ -516,17 +568,18 @@ importMediaUploadRoutes.post(
               expiresAt,
               now,
               currentUpload.version,
+              input.generationId,
             ),
           );
         } else {
           statements.push(
             context.env.DB.prepare(`
               INSERT INTO media_uploads (
-                media_id, import_id, entry_id, owner_subject, source_path, upload_id,
+                media_id, import_id, entry_id, entry_generation_id, owner_subject, source_path, upload_id,
                 part_size, part_count, position, placement, caption, status,
                 expires_at, created_at, updated_at
               ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                ?1, ?2, ?3, ?14, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
                 'uploading', ?12, ?13, ?13
               )
             `).bind(
@@ -543,6 +596,7 @@ importMediaUploadRoutes.post(
               input.caption,
               expiresAt,
               now,
+              input.generationId,
             ),
           );
         }
@@ -580,11 +634,11 @@ importMediaUploadRoutes.post(
           ),
           context.env.DB.prepare(`
             INSERT INTO media_uploads (
-              media_id, import_id, entry_id, owner_subject, source_path, upload_id,
+              media_id, import_id, entry_id, entry_generation_id, owner_subject, source_path, upload_id,
               part_size, part_count, position, placement, caption, status,
               expires_at, created_at, updated_at
             ) VALUES (
-              ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+              ?1, ?2, ?3, ?14, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
               'uploading', ?12, ?13, ?13
             )
           `).bind(
@@ -601,6 +655,7 @@ importMediaUploadRoutes.post(
             input.caption,
             expiresAt,
             now,
+            input.generationId,
           ),
         );
       }
@@ -620,7 +675,7 @@ importMediaUploadRoutes.post(
         const winner = await uploadRowQuery(context.env.DB, mediaId);
         if (
           winner &&
-          uploadMatchesRoute(winner, { importId, entryId, owner }) &&
+          uploadMatchesRoute(winner, { importId, entryId, owner, generationId: input.generationId }) &&
           winner.source_path === input.sourcePath &&
           (winner.status === "uploading" || winner.status === "part_uploading")
         ) {
@@ -643,7 +698,7 @@ importMediaUploadRoutes.post(
         : null;
       if (
         winner &&
-        uploadMatchesRoute(winner, { importId, entryId, owner }) &&
+        uploadMatchesRoute(winner, { importId, entryId, owner, generationId: input.generationId }) &&
         winner.source_path === input.sourcePath &&
         (winner.status === "uploading" || winner.status === "part_uploading")
       ) {
@@ -830,7 +885,12 @@ export async function cleanupExpiredMediaUploads(
           requiredUploadStatus: "aborted",
           now: nowIso,
         }),
-        reconcileImportedEntryStatement(env.DB, upload.entry_id, nowIso),
+        reconcileImportedEntryStatement(
+          env.DB,
+          upload.entry_id,
+          upload.entry_generation_id,
+          nowIso,
+        ),
       ]);
       if (terminal.meta.changes === 1) result.aborted += 1;
       else result.skipped += 1;
@@ -1337,7 +1397,12 @@ importMediaUploadRoutes.post(
         requiredUploadStatus: "aborted",
         now,
       }),
-      reconcileImportedEntryStatement(context.env.DB, entryId, now),
+      reconcileImportedEntryStatement(
+        context.env.DB,
+        entryId,
+        upload.entry_generation_id,
+        now,
+      ),
     ]);
     noStore(context);
     return context.body(null, 204);

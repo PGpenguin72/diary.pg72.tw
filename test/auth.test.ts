@@ -224,9 +224,10 @@ describe("session cookie guard", () => {
         }),
       }),
     );
-    const entry = await localEntry.json<{ id: string }>();
+    const entry = await localEntry.json<{ id: string; generationId: string }>();
     const base = `/api/imports/apple-journal/${importJob.id}/entries/${entry.id}/media/uploads`;
     const initBody = JSON.stringify({
+      generationId: entry.generationId,
       fingerprint: "e".repeat(64),
       sourcePath: "Synthetic/Resources/auth.png",
       type: "photo",

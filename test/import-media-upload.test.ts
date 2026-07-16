@@ -34,7 +34,9 @@ function fingerprint(seed: number): string {
   return seed.toString(16).padStart(64, "0");
 }
 
-async function createImportAndEntry(seed: number): Promise<{ importId: string; entryId: string }> {
+async function createImportAndEntry(
+  seed: number,
+): Promise<{ importId: string; entryId: string; generationId: string }> {
   const start = await worker.fetch(
     new Request("http://localhost/api/imports/apple-journal", {
       method: "POST",
@@ -67,8 +69,8 @@ async function createImportAndEntry(seed: number): Promise<{ importId: string; e
     }),
   );
   expect(entry.status).toBe(201);
-  const imported = await entry.json<{ id: string }>();
-  return { importId: importJob.id, entryId: imported.id };
+  const imported = await entry.json<{ id: string; generationId: string }>();
+  return { importId: importJob.id, entryId: imported.id, generationId: imported.generationId };
 }
 
 function uploadBase(importId: string, entryId: string): string {
@@ -92,9 +94,11 @@ async function startMediaUpload(
 function mediaInput(
   seed: number,
   bytes: Uint8Array,
+  generationId: string,
   type: "photo" | "video" = "photo",
 ): StartAppleJournalMediaUploadInput {
   return {
+    generationId,
     fingerprint: fingerprint(seed),
     sourcePath: type === "video" ? `Synthetic/Resources/${seed}.mov` : `Synthetic/Resources/${seed}.png`,
     type,
@@ -141,9 +145,9 @@ describe("Apple Journal multipart media uploads", () => {
     { label: "PNG image", seed: 101, type: "photo" as const, bytes: PNG_BYTES },
     { label: "QuickTime video", seed: 102, type: "video" as const, bytes: QUICKTIME_BYTES },
   ])("uploads and renders a synthetic $label through the complete API path", async ({ seed, type, bytes }) => {
-    const { importId, entryId } = await createImportAndEntry(seed);
+    const { importId, entryId, generationId } = await createImportAndEntry(seed);
     const base = uploadBase(importId, entryId);
-    const input = mediaInput(seed + 1_000, bytes, type);
+    const input = mediaInput(seed + 1_000, bytes, generationId, type);
     const started = await startMediaUpload(base, input);
     expect(started.response.status).toBe(201);
     expect(started.payload).toMatchObject({ disposition: "uploading", partCount: 1 });
@@ -179,19 +183,19 @@ describe("Apple Journal multipart media uploads", () => {
   });
 
   it("rejects oversized declarations, MIME mismatches, invalid signatures, and invalid part sizes", async () => {
-    const { importId, entryId } = await createImportAndEntry(103);
+    const { importId, entryId, generationId } = await createImportAndEntry(103);
     const base = uploadBase(importId, entryId);
-    const oversized = mediaInput(1_103, PNG_BYTES);
+    const oversized = mediaInput(1_103, PNG_BYTES, generationId);
     oversized.sizeBytes = MAX_MEDIA_BYTES + 1;
     const tooLarge = await startMediaUpload(base, oversized);
     expect(tooLarge.response.status).toBe(413);
 
-    const wrongMime = mediaInput(1_104, QUICKTIME_BYTES, "video");
+    const wrongMime = mediaInput(1_104, QUICKTIME_BYTES, generationId, "video");
     wrongMime.mimeType = "image/png";
     const mismatch = await startMediaUpload(base, wrongMime);
     expect(mismatch.response.status).toBe(400);
 
-    const input = mediaInput(1_105, PNG_BYTES);
+    const input = mediaInput(1_105, PNG_BYTES, generationId);
     const started = await startMediaUpload(base, input);
     if (started.payload.disposition !== "uploading") throw new Error("Expected an upload session");
     const wrongSize = await putPart(
@@ -208,7 +212,7 @@ describe("Apple Journal multipart media uploads", () => {
     );
     expect(wrongSignature.status).toBe(400);
 
-    const sizeMismatchInput = mediaInput(1_109, PNG_BYTES);
+    const sizeMismatchInput = mediaInput(1_109, PNG_BYTES, generationId);
     const sizeMismatchStarted = await startMediaUpload(base, sizeMismatchInput);
     if (sizeMismatchStarted.payload.disposition !== "uploading") {
       throw new Error("Expected an upload session");
@@ -233,10 +237,10 @@ describe("Apple Journal multipart media uploads", () => {
   });
 
   it("enforces ordered parts, resumes partial uploads, and completes after the final part", async () => {
-    const { importId, entryId } = await createImportAndEntry(104);
+    const { importId, entryId, generationId } = await createImportAndEntry(104);
     const base = uploadBase(importId, entryId);
     const totalSize = MULTIPART_PART_BYTES + QUICKTIME_BYTES.byteLength;
-    const input = mediaInput(1_106, QUICKTIME_BYTES, "video");
+    const input = mediaInput(1_106, QUICKTIME_BYTES, generationId, "video");
     input.sizeBytes = totalSize;
     const started = await startMediaUpload(base, input);
     if (started.payload.disposition !== "uploading") throw new Error("Expected an upload session");
@@ -314,9 +318,9 @@ describe("Apple Journal multipart media uploads", () => {
   });
 
   it("aborts an interrupted session and can restart the failed media row", async () => {
-    const { importId, entryId } = await createImportAndEntry(105);
+    const { importId, entryId, generationId } = await createImportAndEntry(105);
     const base = uploadBase(importId, entryId);
-    const input = mediaInput(1_107, PNG_BYTES);
+    const input = mediaInput(1_107, PNG_BYTES, generationId);
     const started = await startMediaUpload(base, input);
     if (started.payload.disposition !== "uploading") throw new Error("Expected an upload session");
     const uploadUrl = `${base}/${started.payload.id}`;
@@ -336,9 +340,9 @@ describe("Apple Journal multipart media uploads", () => {
   });
 
   it("deduplicates simultaneous upload initialization and part claims", async () => {
-    const { importId, entryId } = await createImportAndEntry(107);
+    const { importId, entryId, generationId } = await createImportAndEntry(107);
     const base = uploadBase(importId, entryId);
-    const input = mediaInput(1_110, PNG_BYTES);
+    const input = mediaInput(1_110, PNG_BYTES, generationId);
     const [left, right] = await Promise.all([
       startMediaUpload(base, input),
       startMediaUpload(base, input),
@@ -365,9 +369,9 @@ describe("Apple Journal multipart media uploads", () => {
   });
 
   it("recovers an expired part lease after a crash before the R2 write", async () => {
-    const { importId, entryId } = await createImportAndEntry(108);
+    const { importId, entryId, generationId } = await createImportAndEntry(108);
     const base = uploadBase(importId, entryId);
-    const input = mediaInput(1_111, PNG_BYTES);
+    const input = mediaInput(1_111, PNG_BYTES, generationId);
     const started = await startMediaUpload(base, input);
     if (started.payload.disposition !== "uploading") throw new Error("Expected an upload session");
     await env.DB.prepare(`
@@ -391,11 +395,11 @@ describe("Apple Journal multipart media uploads", () => {
   });
 
   it("rewrites the part and records a fresh ETag after an R2-write-before-D1 crash", async () => {
-    const { importId, entryId } = await createImportAndEntry(109);
+    const { importId, entryId, generationId } = await createImportAndEntry(109);
     const base = uploadBase(importId, entryId);
     const recoveredBytes = new Uint8Array([...PNG_BYTES, 1]);
     const orphanedBytes = new Uint8Array([...PNG_BYTES, 0]);
-    const input = mediaInput(1_112, recoveredBytes);
+    const input = mediaInput(1_112, recoveredBytes, generationId);
     const started = await startMediaUpload(base, input);
     if (started.payload.disposition !== "uploading") throw new Error("Expected an upload session");
     const initial = await readUploadState(started.payload.id);
@@ -424,9 +428,9 @@ describe("Apple Journal multipart media uploads", () => {
   });
 
   it("finalizes from R2 head after completion succeeds before the D1 commit", async () => {
-    const { importId, entryId } = await createImportAndEntry(111);
+    const { importId, entryId, generationId } = await createImportAndEntry(111);
     const base = uploadBase(importId, entryId);
-    const input = mediaInput(1_114, PNG_BYTES);
+    const input = mediaInput(1_114, PNG_BYTES, generationId);
     const started = await startMediaUpload(base, input);
     if (started.payload.disposition !== "uploading") throw new Error("Expected an upload session");
     const uploadUrl = `${base}/${started.payload.id}`;
@@ -458,9 +462,9 @@ describe("Apple Journal multipart media uploads", () => {
   });
 
   it("retries completion after a stale completing lease crashes before R2", async () => {
-    const { importId, entryId } = await createImportAndEntry(112);
+    const { importId, entryId, generationId } = await createImportAndEntry(112);
     const base = uploadBase(importId, entryId);
-    const input = mediaInput(1_115, PNG_BYTES);
+    const input = mediaInput(1_115, PNG_BYTES, generationId);
     const started = await startMediaUpload(base, input);
     if (started.payload.disposition !== "uploading") throw new Error("Expected an upload session");
     const uploadUrl = `${base}/${started.payload.id}`;
@@ -482,9 +486,9 @@ describe("Apple Journal multipart media uploads", () => {
   });
 
   it("serializes complete against abort and never reopens a terminal upload", async () => {
-    const { importId, entryId } = await createImportAndEntry(110);
+    const { importId, entryId, generationId } = await createImportAndEntry(110);
     const base = uploadBase(importId, entryId);
-    const input = mediaInput(1_113, PNG_BYTES);
+    const input = mediaInput(1_113, PNG_BYTES, generationId);
     const started = await startMediaUpload(base, input);
     if (started.payload.disposition !== "uploading") throw new Error("Expected an upload session");
     const uploadUrl = `${base}/${started.payload.id}`;
@@ -518,9 +522,9 @@ describe("Apple Journal multipart media uploads", () => {
   });
 
   it("expires an abandoned upload and allows the same media to restart", async () => {
-    const { importId, entryId } = await createImportAndEntry(113);
+    const { importId, entryId, generationId } = await createImportAndEntry(113);
     const base = uploadBase(importId, entryId);
-    const input = mediaInput(1_116, PNG_BYTES);
+    const input = mediaInput(1_116, PNG_BYTES, generationId);
     const started = await startMediaUpload(base, input);
     if (started.payload.disposition !== "uploading") throw new Error("Expected an upload session");
     const cleanupAt = new Date();
@@ -545,10 +549,54 @@ describe("Apple Journal multipart media uploads", () => {
     expect(restarted.payload).toMatchObject({ id: started.payload.id, disposition: "uploading" });
   });
 
-  it("cleanup reconciles an R2 completion left behind before its D1 commit", async () => {
-    const { importId, entryId } = await createImportAndEntry(114);
+  it("does not replace an expired session while its part lease is still active", async () => {
+    const { importId, entryId, generationId } = await createImportAndEntry(120);
     const base = uploadBase(importId, entryId);
-    const input = mediaInput(1_117, PNG_BYTES);
+    const input = mediaInput(1_120, PNG_BYTES, generationId);
+    const started = await startMediaUpload(base, input);
+    if (started.payload.disposition !== "uploading") throw new Error("Expected an upload session");
+    const before = await readUploadState(started.payload.id);
+    if (!before) throw new Error("Expected persisted upload state");
+
+    await env.DB.prepare(`
+      UPDATE media_uploads SET
+        status = 'part_uploading', active_part = 1,
+        active_part_expires_at = ?2, expires_at = ?3,
+        version = version + 1
+      WHERE media_id = ?1
+    `).bind(
+      started.payload.id,
+      new Date(Date.now() + 60_000).toISOString(),
+      new Date(Date.now() - 60_000).toISOString(),
+    ).run();
+
+    const busy = await startMediaUpload(base, input);
+    expect(busy.response.status).toBe(409);
+    expect(await readUploadState(started.payload.id)).toMatchObject({
+      upload_id: before.upload_id,
+      status: "part_uploading",
+      active_part: 1,
+    });
+
+    await env.DB.prepare(`
+      UPDATE media_uploads SET active_part_expires_at = ?2 WHERE media_id = ?1
+    `).bind(started.payload.id, new Date(Date.now() - 1).toISOString()).run();
+    const restarted = await startMediaUpload(base, input);
+    expect(restarted.response.status).toBe(201);
+    expect(restarted.payload).toMatchObject({
+      id: started.payload.id,
+      disposition: "uploading",
+      uploadedParts: [],
+    });
+    const after = await readUploadState(started.payload.id);
+    expect(after?.upload_id).not.toBe(before.upload_id);
+    expect(after).toMatchObject({ status: "uploading", active_part: null });
+  });
+
+  it("cleanup reconciles an R2 completion left behind before its D1 commit", async () => {
+    const { importId, entryId, generationId } = await createImportAndEntry(114);
+    const base = uploadBase(importId, entryId);
+    const input = mediaInput(1_117, PNG_BYTES, generationId);
     const started = await startMediaUpload(base, input);
     if (started.payload.disposition !== "uploading") throw new Error("Expected an upload session");
     const uploadUrl = `${base}/${started.payload.id}`;
@@ -583,7 +631,7 @@ describe("Apple Journal multipart media uploads", () => {
   it("cleanup preserves active leases and removes only old terminal bookkeeping", async () => {
     const active = await createImportAndEntry(115);
     const activeBase = uploadBase(active.importId, active.entryId);
-    const activeInput = mediaInput(1_118, PNG_BYTES);
+    const activeInput = mediaInput(1_118, PNG_BYTES, active.generationId);
     const activeStarted = await startMediaUpload(activeBase, activeInput);
     if (activeStarted.payload.disposition !== "uploading") throw new Error("Expected an upload session");
     const cleanupAt = new Date();
@@ -609,7 +657,7 @@ describe("Apple Journal multipart media uploads", () => {
 
     const completed = await createImportAndEntry(116);
     const completedBase = uploadBase(completed.importId, completed.entryId);
-    const completedInput = mediaInput(1_119, PNG_BYTES);
+    const completedInput = mediaInput(1_119, PNG_BYTES, completed.generationId);
     const completedStarted = await startMediaUpload(completedBase, completedInput);
     if (completedStarted.payload.disposition !== "uploading") throw new Error("Expected an upload session");
     const completedUrl = `${completedBase}/${completedStarted.payload.id}`;
@@ -643,7 +691,7 @@ describe("Apple Journal multipart media uploads", () => {
   });
 
   it("repairs a legacy failed small-image row instead of misreporting it as a duplicate", async () => {
-    const { importId, entryId } = await createImportAndEntry(106);
+    const { importId, entryId, generationId } = await createImportAndEntry(106);
     const mediaId = crypto.randomUUID();
     const failedFingerprint = fingerprint(1_108);
     const now = new Date().toISOString();
@@ -656,7 +704,7 @@ describe("Apple Journal multipart media uploads", () => {
 
     const repaired = await worker.fetch(
       new Request(
-        `http://localhost/api/imports/apple-journal/${importId}/entries/${entryId}/media?sourcePath=Synthetic%2FResources%2Fretry.png&type=photo&position=0&placement=cover&caption=`,
+        `http://localhost/api/imports/apple-journal/${importId}/entries/${entryId}/media?generationId=${encodeURIComponent(generationId)}&sourcePath=Synthetic%2FResources%2Fretry.png&type=photo&position=0&placement=cover&caption=`,
         {
           method: "POST",
           headers: {

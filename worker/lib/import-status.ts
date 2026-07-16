@@ -6,6 +6,7 @@
 export function reconcileImportedEntryStatement(
   database: D1Database,
   entryId: string,
+  generationId: string,
   now: string,
 ): D1PreparedStatement {
   return database.prepare(`
@@ -15,12 +16,14 @@ export function reconcileImportedEntryStatement(
           SELECT COUNT(*)
           FROM entry_media
           JOIN media ON media.id = entry_media.media_id
-          WHERE entry_media.entry_id = entries.id AND media.status = 'ready'
+          WHERE entry_media.entry_id = entries.id
+            AND entry_media.import_generation_id = ?2
+            AND media.status = 'ready'
         ) >= expected_media_count
         THEN 'published'
         ELSE 'partial-import'
       END,
-      updated_at = ?2
-    WHERE id = ?1 AND source = 'apple_journal'
-  `).bind(entryId, now);
+      updated_at = ?3
+    WHERE id = ?1 AND source = 'apple_journal' AND import_generation_id = ?2
+  `).bind(entryId, generationId, now);
 }

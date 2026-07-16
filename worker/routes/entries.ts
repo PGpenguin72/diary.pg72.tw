@@ -137,7 +137,13 @@ async function loadRelations(
           entry_media.caption, entry_media.placement
         FROM entry_media
         JOIN media ON media.id = entry_media.media_id
-        WHERE entry_media.entry_id IN (${placeholders}) AND media.status = 'ready'
+        JOIN entries ON entries.id = entry_media.entry_id
+        WHERE entry_media.entry_id IN (${placeholders})
+          AND media.status = 'ready'
+          AND (
+            entries.source <> 'apple_journal'
+            OR entry_media.import_generation_id = entries.import_generation_id
+          )
         ORDER BY entry_media.entry_id, entry_media.position
       `)
       .bind(...entryIds)
@@ -690,6 +696,10 @@ entryRoutes.get("/media/:mediaId", async (context) => {
           WHERE entry_media.media_id = media.id
             AND entries.status = 'published'
             AND entries.deleted_at IS NULL
+            AND (
+              entries.source <> 'apple_journal'
+              OR entry_media.import_generation_id = entries.import_generation_id
+            )
         )
       )
   `)

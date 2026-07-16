@@ -40,6 +40,7 @@ const importEntrySchema = z.object({
 }) satisfies z.ZodType<ImportAppleJournalEntryInput>;
 
 const mediaQuerySchema = z.object({
+  generationId: z.uuid(),
   sourcePath: z.string().trim().min(1).max(1_000),
   type: z.enum(["photo", "video", "audio", "drawing"]),
   position: z.coerce.number().int().min(0).max(10_000),
@@ -116,6 +117,41 @@ function importItemStatement(
     input.status,
     input.errorCode ?? null,
     input.now,
+  );
+}
+
+function importedMediaLinkStatement(
+  database: D1Database,
+  input: {
+    entryId: string;
+    generationId: string;
+    mediaId: string;
+    position: number;
+    placement: "inline" | "grid" | "cover";
+    caption: string;
+  },
+): D1PreparedStatement {
+  return database.prepare(`
+    INSERT INTO entry_media (
+      entry_id, media_id, position, placement, caption, import_generation_id
+    )
+    SELECT ?1, ?3, ?4, ?5, ?6, ?2
+    WHERE EXISTS (
+      SELECT 1 FROM entries
+      WHERE id = ?1 AND source = 'apple_journal' AND import_generation_id = ?2
+    )
+    ON CONFLICT(entry_id, media_id) DO UPDATE SET
+      position = excluded.position,
+      placement = excluded.placement,
+      caption = excluded.caption,
+      import_generation_id = excluded.import_generation_id
+  `).bind(
+    input.entryId,
+    input.generationId,
+    input.mediaId,
+    input.position,
+    input.placement,
+    input.caption,
   );
 }
 
@@ -205,6 +241,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
     .bind(input.sourcePath, sourceHash)
     .first<ExistingEntryRow>();
   const entryId = existing?.id ?? crypto.randomUUID();
+  const generationId = crypto.randomUUID();
   const now = new Date().toISOString();
   const blockId = crypto.randomUUID();
   const wordCount = countWords(`${input.title} ${input.body}`);
@@ -214,9 +251,12 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
   if (duplicate) {
     await context.env.DB.batch([
       context.env.DB.prepare(`
-        UPDATE entries SET expected_media_count = ?2, deleted_at = NULL, updated_at = ?3
+        UPDATE entries SET
+          expected_media_count = ?2, import_generation_id = ?3,
+          status = CASE WHEN ?2 = 0 THEN 'published' ELSE 'partial-import' END,
+          deleted_at = NULL, updated_at = ?4
         WHERE id = ?1
-      `).bind(entryId, input.mediaCount, now),
+      `).bind(entryId, input.mediaCount, generationId, now),
       importItemStatement(context.env.DB, {
         id: crypto.randomUUID(),
         importId,
@@ -227,7 +267,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
         status: "duplicate",
         now,
       }),
-      reconcileImportedEntryStatement(context.env.DB, entryId, now),
+      reconcileImportedEntryStatement(context.env.DB, entryId, generationId, now),
     ]);
   } else if (existing) {
     await context.env.DB.batch([
@@ -245,8 +285,9 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
           layout_seed = ?11,
           word_count = ?12,
           expected_media_count = ?13,
+          import_generation_id = ?14,
           status = 'partial-import',
-          updated_at = ?14,
+          updated_at = ?15,
           deleted_at = NULL
         WHERE id = ?1
       `).bind(
@@ -263,6 +304,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
         wordCount % 97,
         wordCount,
         input.mediaCount,
+        generationId,
         now,
       ),
       context.env.DB.prepare(`DELETE FROM entry_blocks WHERE entry_id = ?1`).bind(entryId),
@@ -285,7 +327,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
         status: "completed",
         now,
       }),
-      reconcileImportedEntryStatement(context.env.DB, entryId, now),
+      reconcileImportedEntryStatement(context.env.DB, entryId, generationId, now),
     ]);
   } else {
     await context.env.DB.batch([
@@ -293,12 +335,12 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
         INSERT INTO entries (
           id, journal_id, source, source_id, source_hash, title, excerpt,
           occurred_at, timezone, local_date, location_name, mood, layout_seed,
-          word_count, expected_media_count, status, created_at, updated_at
+          word_count, expected_media_count, import_generation_id, status, created_at, updated_at
         ) VALUES (
           ?1, 'journal-everyday', 'apple_journal', ?2, ?3, ?4, ?5,
-          ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+          ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
           CASE WHEN ?13 = 0 THEN 'published' ELSE 'partial-import' END,
-          ?14, ?14
+          ?15, ?15
         )
       `).bind(
         entryId,
@@ -314,6 +356,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
         wordCount % 97,
         wordCount,
         input.mediaCount,
+        generationId,
         now,
       ),
       context.env.DB.prepare(`
@@ -339,6 +382,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
 
   const response: ImportAppleJournalEntryResponse = {
     id: entryId,
+    generationId,
     disposition: duplicate ? "duplicate" : existing ? "updated" : "inserted",
   };
   noStore(context);
@@ -358,13 +402,17 @@ importRoutes.post("/imports/apple-journal/:importId/entries/:entryId/media", asy
   const [importJob, entry] = await Promise.all([
     context.env.DB.prepare(`SELECT id FROM imports WHERE id = ?1`).bind(importId).first<{ id: string }>(),
     context.env.DB.prepare(`
-      SELECT id FROM entries WHERE id = ?1 AND source = 'apple_journal'
+      SELECT id, import_generation_id FROM entries
+      WHERE id = ?1 AND source = 'apple_journal'
     `)
       .bind(entryId)
-      .first<{ id: string }>(),
+      .first<{ id: string; import_generation_id: string | null }>(),
   ]);
   if (!importJob) return apiError(context, 404, "IMPORT_NOT_FOUND", "找不到這次匯入工作。");
   if (!entry) return apiError(context, 404, "ENTRY_NOT_FOUND", "找不到這篇匯入日記。");
+  if (entry.import_generation_id !== query.data.generationId) {
+    return apiError(context, 409, "ENTRY_IMPORT_GENERATION_CHANGED", "這篇日記已有更新的匯入工作，請重新開始。");
+  }
 
   const input = query.data;
   const ownerSubject = uploadOwnerSubject(context);
@@ -385,11 +433,14 @@ importRoutes.post("/imports/apple-journal/:importId/entries/:entryId/media", asy
       context.env.DB.prepare(`
         UPDATE media SET owner_subject = ?2, updated_at = ?3 WHERE id = ?1
       `).bind(existingMedia.id, ownerSubject, now),
-      context.env.DB.prepare(`
-        INSERT OR IGNORE INTO entry_media (
-          entry_id, media_id, position, placement, caption
-        ) VALUES (?1, ?2, ?3, ?4, ?5)
-      `).bind(entryId, existingMedia.id, input.position, input.placement, input.caption),
+      importedMediaLinkStatement(context.env.DB, {
+        entryId,
+        generationId: input.generationId,
+        mediaId: existingMedia.id,
+        position: input.position,
+        placement: input.placement,
+        caption: input.caption,
+      }),
       importItemStatement(context.env.DB, {
         id: crypto.randomUUID(),
         importId,
@@ -400,7 +451,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries/:entryId/media", asy
         status: "duplicate",
         now,
       }),
-      reconcileImportedEntryStatement(context.env.DB, entryId, now),
+      reconcileImportedEntryStatement(context.env.DB, entryId, input.generationId, now),
     ]);
 
     const response: ImportAppleJournalMediaResponse = {
@@ -435,11 +486,14 @@ importRoutes.post("/imports/apple-journal/:importId/entries/:entryId/media", asy
           size_bytes = ?4, updated_at = ?5
         WHERE id = ?1
       `).bind(existingMedia.id, ownerSubject, upload.mimeType, upload.sizeBytes, now),
-      context.env.DB.prepare(`
-        INSERT OR IGNORE INTO entry_media (
-          entry_id, media_id, position, placement, caption
-        ) VALUES (?1, ?2, ?3, ?4, ?5)
-      `).bind(entryId, existingMedia.id, input.position, input.placement, input.caption),
+      importedMediaLinkStatement(context.env.DB, {
+        entryId,
+        generationId: input.generationId,
+        mediaId: existingMedia.id,
+        position: input.position,
+        placement: input.placement,
+        caption: input.caption,
+      }),
       importItemStatement(context.env.DB, {
         id: crypto.randomUUID(),
         importId,
@@ -450,7 +504,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries/:entryId/media", asy
         status: "completed",
         now,
       }),
-      reconcileImportedEntryStatement(context.env.DB, entryId, now),
+      reconcileImportedEntryStatement(context.env.DB, entryId, input.generationId, now),
     ]);
     const response: ImportAppleJournalMediaResponse = {
       id: existingMedia.id,
@@ -475,11 +529,14 @@ importRoutes.post("/imports/apple-journal/:importId/entries/:entryId/media", asy
     ownerSubject,
     now,
     successStatements: [
-      context.env.DB.prepare(`
-        INSERT OR IGNORE INTO entry_media (
-          entry_id, media_id, position, placement, caption
-        ) VALUES (?1, ?2, ?3, ?4, ?5)
-      `).bind(entryId, mediaId, input.position, input.placement, input.caption),
+      importedMediaLinkStatement(context.env.DB, {
+        entryId,
+        generationId: input.generationId,
+        mediaId,
+        position: input.position,
+        placement: input.placement,
+        caption: input.caption,
+      }),
       importItemStatement(context.env.DB, {
         id: crypto.randomUUID(),
         importId,
@@ -490,7 +547,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries/:entryId/media", asy
         status: "completed",
         now,
       }),
-      reconcileImportedEntryStatement(context.env.DB, entryId, now),
+      reconcileImportedEntryStatement(context.env.DB, entryId, input.generationId, now),
     ],
     failureStatements: [
       importItemStatement(context.env.DB, {

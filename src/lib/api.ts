@@ -253,6 +253,7 @@ export function importAppleJournalMedia(
   importId: string,
   entryId: string,
   media: {
+    generationId: string;
     stream: ReadableStream<Uint8Array>;
     mimeType: string;
     sizeBytes: number;
@@ -267,6 +268,7 @@ export function importAppleJournalMedia(
   onProgress?: (progress: MediaUploadProgress) => void,
 ): Promise<ImportAppleJournalMediaResponse> {
   return uploadAppleJournalMediaMultipart(importId, entryId, {
+    generationId: media.generationId,
     fingerprint: media.fingerprint,
     sourcePath: media.sourcePath,
     type: media.type,

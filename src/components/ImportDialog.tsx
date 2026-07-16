@@ -215,6 +215,7 @@ export function ImportDialog({
               if (!mediaReader) throw new Error("媒體讀取器尚未建立。");
               const opened = await mediaReader.open(media, controller.signal);
               const importedMedia = await importAppleJournalMedia(importJob.id, importedEntry.id, {
+                generationId: importedEntry.generationId,
                 stream: opened.stream,
                 mimeType: opened.mimeType,
                 sizeBytes: opened.sizeBytes,

@@ -51,7 +51,13 @@ overviewRoutes.get("/overview", async (context) => {
         SELECT 1
         FROM entry_media
         JOIN entries ON entries.id = entry_media.entry_id
-        WHERE entry_media.media_id = media.id AND entries.deleted_at IS NULL
+        WHERE entry_media.media_id = media.id
+          AND entries.deleted_at IS NULL
+          AND entries.status = 'published'
+          AND (
+            entries.source <> 'apple_journal'
+            OR entry_media.import_generation_id = entries.import_generation_id
+          )
       )
     `).first<MediaTotalsRow>(),
     context.env.DB.prepare(`
