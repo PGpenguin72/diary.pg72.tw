@@ -832,8 +832,8 @@ img {
   display: block;
   width: 13px;
   height: 13px;
-  background: #171b21;
-  border: 1px solid #242a32;
+  background: var(--surface);
+  border: 1px solid var(--line);
   border-radius: 2px;
 }
 
@@ -1249,7 +1249,7 @@ img {
   width: 100%;
   min-width: 0;
   margin: 0 0 12px;
-  background: #090c10;
+  background: var(--charcoal);
   border: 1px solid var(--line);
   border-radius: 6px;
   overflow: hidden;
@@ -1307,7 +1307,7 @@ img {
 
 .entry-dialog__audio-list figure {
   margin: 0;
-  background: #090c10;
+  background: var(--charcoal);
   border: 1px solid var(--line);
   border-radius: 6px;
   overflow: hidden;
@@ -1453,9 +1453,9 @@ img {
 .entry-prose code {
   padding: 2px 5px;
   color: #f4d98a;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-family: var(--mono);
   font-size: 0.88em;
-  background: #090c10;
+  background: var(--charcoal);
   border: 1px solid var(--line);
   border-radius: 3px;
 }
@@ -1465,7 +1465,7 @@ img {
   margin: 0 0 20px;
   padding: 14px;
   overflow-x: auto;
-  background: #090c10;
+  background: var(--charcoal);
   border: 1px solid var(--line);
   border-radius: 5px;
 }
@@ -1494,7 +1494,7 @@ img {
 
 .entry-prose th {
   color: var(--ink);
-  background: #11151a;
+  background: var(--surface-raised);
 }
 
 .entry-prose hr {
@@ -1520,8 +1520,8 @@ img {
   position: fixed;
   inset: 0;
   z-index: 220;
-  background: #030406;
-  animation: backdrop-in 160ms ease both;
+  background: #020203;
+  animation: backdrop-in 160ms var(--ease-out) both;
 }
 
 .media-lightbox__dialog {
@@ -1556,8 +1556,8 @@ img {
   width: 42px;
   height: 42px;
   color: #f4f6f8;
-  background: rgba(17, 21, 26, 0.92);
-  border-color: #353c46;
+  background: rgba(10, 10, 12, 0.92);
+  border-color: var(--line-strong);
 }
 
 .media-lightbox__close {
@@ -1864,7 +1864,7 @@ img {
   gap: 10px;
   min-width: 0;
   padding: 8px 10px;
-  background: #0b0e12;
+  background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 6px;
 }
@@ -1877,7 +1877,7 @@ img {
   height: 42px;
   overflow: hidden;
   color: var(--ink-soft);
-  background: #090c10;
+  background: var(--charcoal);
   border: 1px solid var(--line);
   border-radius: 4px;
 }
@@ -1968,7 +1968,7 @@ img {
   width: min(360px, 100%);
   height: 6px;
   margin-top: 8px;
-  background: #20252d;
+  background: rgba(255, 255, 255, 0.08);
   border-radius: 3px;
   overflow: hidden;
 }
@@ -2050,7 +2050,7 @@ img {
 }
 
 .import-steps li[data-active="true"]::before {
-  color: #0a0c0f;
+  color: #ffffff;
   background: var(--forest);
   border-color: var(--forest);
 }

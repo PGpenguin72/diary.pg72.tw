@@ -34,4 +34,12 @@
 ## 中斷與接手（2026-07-16）
 
 - 前一 session 於 Step 4 完成後、commit 前因 API 503 中斷；working tree 留有完整 Step 1–4 diff。
-- 接手 session 檢視 diff：lime accent 無殘留、reduced-motion 全域覆蓋 ambient 動畫、`pnpm run check` 與 `pnpm run build` 通過，判定可用，直接 commit 保存。
+- 接手 session 檢視 diff：lime accent 無殘留、reduced-motion 全域覆蓋 ambient 動畫、`pnpm run check` 與 `pnpm run build` 通過，判定可用，直接 commit 保存（`1c6fe6a`）。
+
+## 續作步驟
+
+- [x] Step 5 — 舊色票殘留清掃與 token 化：heatmap 空格、entry-prose th/code/pre、媒體格/縮圖井、compose attachment、lightbox 背景與導航鈕、import 進度條軌道全部改用 morden token（`--surface` / `--surface-raised` / `--charcoal` / `--line*` / 半透明白）；import step 啟用態數字改白字（indigo 上深字對比不足）；code 字體改 `var(--mono)`；`index.html` `theme-color` 由紙白 `#f4f1ea` 改 `#050506`。驗證：`pnpm run check`、`pnpm run build` 通過；全檔已無舊藍灰色票（#090c10/#171b21/#11151a/#0b0e12/#20252d/#242a32/#353c46/#030406/#0a0c0f）。
+
+## 狀態
+
+整站視覺統一完成：token、accent sweep、元件規格、環境光背景、殘留清掃皆已 commit。未 push、未部署。刻意保留項見「決策紀錄」（serif 長文、journal-color、語意色）。
