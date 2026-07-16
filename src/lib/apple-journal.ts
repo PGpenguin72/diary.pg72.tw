@@ -2,10 +2,10 @@ import {
   BlobReader,
   TextWriter,
   ZipReader,
-  type Entry,
   type FileEntry,
 } from "@zip.js/zip.js";
 import {
+  addArchivePathMetadataBytes,
   AppleJournalArchiveError,
   normalizeArchivePath,
 } from "./archive-safety";
@@ -18,6 +18,7 @@ const MAX_HTML_ENTRY_BYTES = 5 * 1024 * 1024;
 const MAX_TOTAL_HTML_BYTES = 32 * 1024 * 1024;
 const MAX_PREVIEW_TEXT_BYTES = 32 * 1024 * 1024;
 const MAX_PREVIEW_ENTRIES = 10_000;
+const MAX_RECONCILIATION_ITEMS = 50_000;
 const MAX_COMPRESSION_RATIO = 500;
 
 const mimeTypes: Record<string, string> = {
@@ -105,7 +106,7 @@ function resolveArchivePath(basePath: string, reference: string): string | null 
     stack.push(part);
   }
 
-  return stack.join("/");
+  return normalizeArchivePath(stack.join("/"));
 }
 
 async function sha256(value: string): Promise<string> {
@@ -115,7 +116,6 @@ async function sha256(value: string): Promise<string> {
 
 async function openArchive(file: File): Promise<{
   reader: ZipReader<Blob>;
-  entries: Entry[];
   filesByPath: Map<string, FileEntry>;
 }> {
   const signature = new Uint8Array(await file.slice(0, 4).arrayBuffer());
@@ -138,8 +138,10 @@ async function openArchive(file: File): Promise<{
 
     const filesByPath = new Map<string, FileEntry>();
     const lowerPaths = new Set<string>();
+    let pathMetadataBytes = 0;
     for (const entry of entries) {
       const path = normalizeArchivePath(entry.filename);
+      pathMetadataBytes = addArchivePathMetadataBytes(pathMetadataBytes, path);
       if (entry.encrypted) {
         throw new AppleJournalArchiveError("目前不支援有密碼的 Apple Journal ZIP。");
       }
@@ -162,7 +164,7 @@ async function openArchive(file: File): Promise<{
       }
     }
 
-    return { reader, entries, filesByPath };
+    return { reader, filesByPath };
   } catch (error) {
     await reader.close().catch(() => undefined);
     if (error instanceof AppleJournalArchiveError) throw error;
@@ -425,11 +427,10 @@ export async function inspectAppleJournalArchive(file: File): Promise<AppleJourn
   }
   if (file.size === 0) throw new AppleJournalArchiveError("這個 ZIP 沒有內容。");
 
-  const { reader, entries, filesByPath } = await openArchive(file);
+  const { reader, filesByPath } = await openArchive(file);
   try {
-    const centralDirectoryFingerprint = entries
-      .filter((entry) => !entry.directory)
-      .map((entry) => `${normalizeArchivePath(entry.filename)}:${entry.uncompressedSize}:${entry.signature}`)
+    const centralDirectoryFingerprint = [...filesByPath]
+      .map(([path, entry]) => `${path}:${entry.uncompressedSize}:${entry.signature}`)
       .sort()
       .join("\n");
     const fileFingerprint = await sha256(`${file.size}\n${centralDirectoryFingerprint}`);
@@ -503,6 +504,14 @@ export async function inspectAppleJournalArchive(file: File): Promise<AppleJourn
         throw new AppleJournalArchiveError("日記預覽內容超過單次記憶體上限，請分批匯入。");
       }
       parsedEntries.push(parsedEntry);
+    }
+
+    const reconciliationItemCount = parsedEntries.reduce(
+      (total, entry) => total + 1 + entry.media.length,
+      0,
+    );
+    if (reconciliationItemCount > MAX_RECONCILIATION_ITEMS) {
+      throw new AppleJournalArchiveError("匯入核對項目超過單次處理上限，請分批匯入。");
     }
 
     parsedEntries.sort((left, right) => left.occurredAt.localeCompare(right.occurredAt));

@@ -332,6 +332,80 @@ test("@desktop partial import exposes itemized failures and a report", async ({ 
   });
 });
 
+test("@desktop entry failures itemize every skipped attachment", async ({ page }, testInfo) => {
+  const archive = await syntheticAppleJournalZip();
+  let completionSummary: unknown;
+  await page.route(/\/api\/imports\/apple-journal\/[^/]+\/entries$/, async (route) => {
+    await route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ error: { message: "合成的日記服務暫時無法使用。" } }),
+    });
+  });
+  await page.route(/\/api\/imports\/apple-journal\/[^/]+\/complete$/, async (route) => {
+    completionSummary = route.request().postDataJSON();
+    await route.continue();
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "匯入" }).click();
+  const importDialog = page.getByRole("dialog", { name: "匯入日記" });
+  await importDialog.locator('input[type="file"]').setInputFiles({
+    name: "SyntheticEntryFailure.zip",
+    mimeType: "application/zip",
+    buffer: archive,
+  });
+  await importDialog.getByRole("button", { name: "開始匯入" }).click();
+  await expect(importDialog.getByText("1 個失敗")).toBeVisible();
+  await expect(importDialog.getByText("4 個跳過")).toBeVisible();
+  const issues = importDialog.getByRole("list", { name: "匯入失敗項目" });
+  await expect(issues.getByRole("listitem")).toHaveCount(5);
+  expect(completionSummary).toMatchObject({
+    insertedCount: 0,
+    duplicateCount: 0,
+    failedCount: 1,
+    skippedCount: 4,
+  });
+
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    importDialog.getByRole("button", { name: "下載失敗報告" }).click(),
+  ]);
+  const reportPath = await download.path();
+  if (!reportPath) throw new Error("Expected a local failure report");
+  const report = JSON.parse(await readFile(reportPath, "utf8")) as {
+    failedCount: number;
+    skippedCount: number;
+    reconciliationItemCount: number;
+    failures: Array<{
+      outcome: "failed" | "skipped";
+      kind: "entry" | "media";
+      sourcePath: string;
+      entrySourcePath: string;
+      fingerprint?: string;
+    }>;
+  };
+  expect(report).toMatchObject({
+    failedCount: 1,
+    skippedCount: 4,
+    reconciliationItemCount: 5,
+  });
+  expect(report.failures).toHaveLength(5);
+  expect(report.failures[0]).toMatchObject({
+    outcome: "failed",
+    kind: "entry",
+    sourcePath: "AppleJournalEntries/Entries/2024-11-03.html",
+  });
+  expect(report.failures.slice(1).every((issue) =>
+    issue.outcome === "skipped" &&
+    issue.kind === "media" &&
+    issue.entrySourcePath === "AppleJournalEntries/Entries/2024-11-03.html" &&
+    Boolean(issue.fingerprint)
+  )).toBe(true);
+  await waitForVisualStability(importDialog);
+  await page.screenshot({ path: testInfo.outputPath("import-entry-failure.png") });
+});
+
 test("import error and valid preview stay within the viewport", async ({ page }, testInfo) => {
   await page.goto("/");
   await page.getByRole("button", { name: "匯入" }).click();
@@ -354,6 +428,13 @@ test("import error and valid preview stay within the viewport", async ({ page },
   expect((box?.y ?? 0) + (box?.height ?? 0)).toBeLessThanOrEqual(viewport?.height ?? 0);
   expect(await importDialog.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("import-error.png") });
+
+  await importDialog.locator('input[type="file"]').setInputFiles({
+    name: "SyntheticOverlongPath.zip",
+    mimeType: "application/zip",
+    buffer: await syntheticAppleJournalZip({ entryFile: `${"a".repeat(1_025)}.html` }),
+  });
+  await expect(importDialog.getByText("ZIP 內有過長的檔案路徑。")).toBeVisible();
 
   await importDialog.locator('input[type="file"]').setInputFiles({
     name: "SyntheticAppleJournalEntries.zip",

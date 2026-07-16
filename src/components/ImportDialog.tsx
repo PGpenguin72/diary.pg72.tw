@@ -25,9 +25,19 @@ import { formatBytes } from "../lib/format";
 interface ImportSummary {
   imported: number;
   duplicates: number;
+  skipped: number;
   failed: number;
-  failures: Array<{ item: string; message: string }>;
-  unlistedFailures: number;
+  failures: ImportReconciliationIssue[];
+}
+
+interface ImportReconciliationIssue {
+  outcome: "failed" | "skipped";
+  kind: "entry" | "media";
+  item: string;
+  sourcePath: string;
+  entrySourcePath: string;
+  fingerprint?: string;
+  message: string;
 }
 
 type ImportState =
@@ -55,20 +65,30 @@ function errorMessage(error: unknown): string {
   return "無法讀取這個 Apple Journal ZIP。";
 }
 
-function recordFailure(summary: ImportSummary, item: string, error: unknown): void {
+function recordFailure(
+  summary: ImportSummary,
+  issue: Omit<ImportReconciliationIssue, "outcome" | "message">,
+  error: unknown,
+): void {
   summary.failed += 1;
-  if (summary.failures.length < 100) {
-    summary.failures.push({ item, message: errorMessage(error) });
-  } else {
-    summary.unlistedFailures += 1;
-  }
+  summary.failures.push({ ...issue, outcome: "failed", message: errorMessage(error) });
+}
+
+function recordSkipped(
+  summary: ImportSummary,
+  issue: Omit<ImportReconciliationIssue, "outcome" | "message">,
+  message: string,
+): void {
+  summary.skipped += 1;
+  summary.failures.push({ ...issue, outcome: "skipped", message });
 }
 
 function downloadFailureReport(summary: ImportSummary): void {
   const report = JSON.stringify({
     generatedAt: new Date().toISOString(),
     failedCount: summary.failed,
-    unlistedFailures: summary.unlistedFailures,
+    skippedCount: summary.skipped,
+    reconciliationItemCount: summary.failures.length,
     failures: summary.failures,
   }, null, 2);
   const url = URL.createObjectURL(new Blob([report], { type: "application/json" }));
@@ -124,9 +144,9 @@ export function ImportDialog({
     const summary: ImportSummary = {
       imported: 0,
       duplicates: 0,
+      skipped: 0,
       failed: 0,
       failures: [],
-      unlistedFailures: 0,
     };
     const controller = new AbortController();
     importAbortRef.current = controller;
@@ -188,7 +208,21 @@ export function ImportDialog({
             else summary.imported += 1;
           } catch (error) {
             if (controller.signal.aborted) throw error;
-            recordFailure(summary, entry.title, error);
+            recordFailure(summary, {
+              kind: "entry",
+              item: entry.title,
+              sourcePath: entry.sourcePath,
+              entrySourcePath: entry.sourcePath,
+            }, error);
+            for (const [position, media] of entry.media.entries()) {
+              recordSkipped(summary, {
+                kind: "media",
+                item: `${entry.title} · 媒體 ${position + 1}/${entry.media.length}`,
+                sourcePath: media.archivePath,
+                entrySourcePath: entry.sourcePath,
+                fingerprint: media.fingerprint,
+              }, "所屬日記建立失敗，因此未嘗試這個附件。");
+            }
             completed += 1 + entry.media.length;
             continue;
           }
@@ -245,7 +279,13 @@ export function ImportDialog({
               }
             } catch (error) {
               if (controller.signal.aborted) throw error;
-              recordFailure(summary, mediaLabel, error);
+              recordFailure(summary, {
+                kind: "media",
+                item: mediaLabel,
+                sourcePath: media.archivePath,
+                entrySourcePath: entry.sourcePath,
+                fingerprint: media.fingerprint,
+              }, error);
             }
             completed += 1;
           }
@@ -257,7 +297,7 @@ export function ImportDialog({
       await completeAppleJournalImport(importJob.id, {
         insertedCount: summary.imported,
         duplicateCount: summary.duplicates,
-        skippedCount: 0,
+        skippedCount: summary.skipped,
         failedCount: summary.failed,
       }, controller.signal);
       await onImported();
@@ -421,6 +461,7 @@ export function ImportDialog({
               <span>
                 {state.summary.imported} 篇已寫入 · {state.summary.duplicates} 篇重複
                 {state.summary.failed ? ` · ${state.summary.failed} 個失敗` : ""}
+                {state.summary.skipped ? ` · ${state.summary.skipped} 個跳過` : ""}
               </span>
               <small>
                 {state.summary.failed
@@ -435,8 +476,8 @@ export function ImportDialog({
                       <span>{failure.message}</span>
                     </li>
                   ))}
-                  {state.summary.failed > 5 ? (
-                    <li>另有 {state.summary.failed - 5} 個失敗項目，請下載完整報告。</li>
+                  {state.summary.failures.length > 5 ? (
+                    <li>另有 {state.summary.failures.length - 5} 個未完成項目，請下載完整報告。</li>
                   ) : null}
                 </ul>
               ) : null}
