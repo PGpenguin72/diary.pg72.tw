@@ -268,7 +268,7 @@ entryRoutes.get("/entries/:entryId", async (context) => {
       entries.word_count, journals.name AS journal_name, journals.color AS journal_color
     FROM entries
     JOIN journals ON journals.id = entries.journal_id
-    WHERE entries.id = ?1 AND entries.deleted_at IS NULL
+    WHERE entries.id = ?1 AND entries.deleted_at IS NULL AND entries.status = 'published'
   `)
     .bind(entryId)
     .first<EntryRow>();
@@ -678,9 +678,20 @@ entryRoutes.delete("/entries/:entryId/media/:mediaId", async (context) => {
 entryRoutes.get("/media/:mediaId", async (context) => {
   const mediaId = context.req.param("mediaId");
   const media = await context.env.DB.prepare(`
-    SELECT r2_key, storage_kind
+    SELECT media.r2_key, media.storage_kind
     FROM media
-    WHERE id = ?1 AND status = 'ready'
+    WHERE media.id = ?1 AND media.status = 'ready'
+      AND (
+        media.storage_kind = 'demo_asset'
+        OR EXISTS (
+          SELECT 1
+          FROM entry_media
+          JOIN entries ON entries.id = entry_media.entry_id
+          WHERE entry_media.media_id = media.id
+            AND entries.status = 'published'
+            AND entries.deleted_at IS NULL
+        )
+      )
   `)
     .bind(mediaId)
     .first<{ r2_key: string; storage_kind: "private_r2" | "demo_asset" }>();

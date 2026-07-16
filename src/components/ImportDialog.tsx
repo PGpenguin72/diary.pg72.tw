@@ -129,6 +129,7 @@ export function ImportDialog({
           try {
             importedEntry = await importAppleJournalEntry(importJob.id, {
               sourcePath: entry.sourcePath,
+              mediaCount: entry.media.length,
               title: entry.title,
               body: entry.body,
               occurredAt: entry.occurredAt,

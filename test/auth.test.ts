@@ -213,6 +213,7 @@ describe("session cookie guard", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sourcePath: "Synthetic/Entries/auth.html",
+          mediaCount: 1,
           title: "合成授權測試",
           body: "不含私人資料的測試內容。",
           occurredAt: "2026-07-17T00:00:00.000Z",

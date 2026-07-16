@@ -85,6 +85,7 @@
 - entry 逐篇 D1 upsert；zip.js 以 backpressure 串流解壓、瀏覽器只保留目前的 8 MiB part，再由 Worker 的 owner-bound R2 multipart session 寫入 private R2。
 - 依 archive fingerprint、source path、canonical content hash 與媒體 fingerprint 去重；同一 ZIP 可重新選取並安全重跑。
 - D1 `media_uploads` / `media_upload_parts` 保存 upload session、part 順序與 opaque ETag；每段重試三次，中斷後可續傳，取消會 abort，failed row 可恢復而不再假裝成 duplicate。
+- part/complete/abort 以 version、next part 與短 lease 做 D1 CAS；hard crash 可重寫同一 part，R2 已 complete 但 D1 未 finalize 時可由 object head reconciliation。含附件的 entry 在全部預期附件 ready 前維持非公開 `partial-import`。
 - import job 與 import item 會記錄進度；部分失敗 UI 會保留錯誤並允許重跑同一 ZIP。
 
 主要檔案：

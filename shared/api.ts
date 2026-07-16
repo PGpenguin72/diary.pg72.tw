@@ -131,6 +131,7 @@ export interface StartAppleJournalImportResponse {
 
 export interface ImportAppleJournalEntryInput {
   sourcePath: string;
+  mediaCount: number;
   title: string;
   body: string;
   occurredAt: string;

@@ -8,6 +8,7 @@ import type {
 } from "../../shared/api";
 import type { AuthVariables } from "../lib/auth/middleware";
 import { apiError, noStore } from "../lib/http";
+import { reconcileImportedEntryStatement } from "../lib/import-status";
 import {
   MAX_MEDIA_BYTES,
   MAX_MULTIPART_PARTS,
@@ -18,6 +19,8 @@ import {
 } from "../lib/media";
 
 const UPLOAD_TTL_MS = 24 * 60 * 60 * 1_000;
+export const PART_UPLOAD_LEASE_MS = 10 * 60 * 1_000;
+export const UPLOAD_STATE_LEASE_MS = 10 * 60 * 1_000;
 // R2 returns an opaque ETag; keep the exact value for complete(), but reject
 // empty, control-character, or unreasonably large values before persistence.
 const ETAG_PATTERN = /^[\x21-\x7e]{1,256}$/;
@@ -60,7 +63,19 @@ interface UploadRow {
   position: number;
   placement: "inline" | "grid" | "cover";
   caption: string;
-  status: "uploading" | "completing" | "completed" | "failed" | "aborted";
+  status:
+    | "uploading"
+    | "part_uploading"
+    | "completing"
+    | "aborting"
+    | "completed"
+    | "failed"
+    | "aborted";
+  version: number;
+  next_part: number;
+  active_part: number | null;
+  active_part_expires_at: string | null;
+  state_expires_at: string | null;
   expires_at: string;
 }
 
@@ -133,6 +148,8 @@ function uploadRowQuery(database: D1Database, mediaId: string): Promise<UploadRo
       media_uploads.owner_subject, media_uploads.source_path, media_uploads.upload_id,
       media_uploads.part_size, media_uploads.part_count, media_uploads.position,
       media_uploads.placement, media_uploads.caption, media_uploads.status,
+      media_uploads.version, media_uploads.next_part, media_uploads.active_part,
+      media_uploads.active_part_expires_at, media_uploads.state_expires_at,
       media_uploads.expires_at, media.r2_key, media.status AS media_status,
       media.type, media.mime_type, media.size_bytes
     FROM media_uploads
@@ -161,16 +178,32 @@ async function finalizeUpload(
   database: D1Database,
   upload: UploadRow,
   fingerprint: string,
-): Promise<void> {
+): Promise<boolean> {
   const now = new Date().toISOString();
   await database.batch([
     database.prepare(`
-      UPDATE media SET status = 'ready', updated_at = ?2 WHERE id = ?1
+      UPDATE media_uploads SET
+        status = 'completed', active_part = NULL, active_part_expires_at = NULL,
+        state_expires_at = NULL, version = version + 1, updated_at = ?4
+      WHERE media_id = ?1 AND owner_subject = ?2
+        AND status = 'completing' AND version = ?3
+    `).bind(upload.media_id, upload.owner_subject, upload.version, now),
+    database.prepare(`
+      UPDATE media SET status = 'ready', updated_at = ?2
+      WHERE id = ?1 AND EXISTS (
+        SELECT 1 FROM media_uploads
+        WHERE media_id = ?1 AND status = 'completed'
+      )
     `).bind(upload.media_id, now),
     database.prepare(`
       INSERT OR IGNORE INTO entry_media (
         entry_id, media_id, position, placement, caption
-      ) VALUES (?1, ?2, ?3, ?4, ?5)
+      )
+      SELECT ?1, ?2, ?3, ?4, ?5
+      WHERE EXISTS (
+        SELECT 1 FROM media_uploads
+        WHERE media_id = ?2 AND status = 'completed'
+      )
     `).bind(
       upload.entry_id,
       upload.media_id,
@@ -186,10 +219,31 @@ async function finalizeUpload(
       status: "completed",
       now,
     }),
-    database.prepare(`
-      UPDATE media_uploads SET status = 'completed', updated_at = ?2 WHERE media_id = ?1
-    `).bind(upload.media_id, now),
+    reconcileImportedEntryStatement(database, upload.entry_id, now),
   ]);
+
+  const completed = await uploadRowQuery(database, upload.media_id);
+  return completed?.status === "completed" && completed.media_status === "ready";
+}
+
+function uploadResponse(
+  upload: UploadRow,
+  uploadedParts: number[],
+): StartAppleJournalMediaUploadResponse {
+  return {
+    id: upload.media_id,
+    disposition: "uploading",
+    partSize: upload.part_size,
+    partCount: upload.part_count,
+    uploadedParts,
+  };
+}
+
+async function uploadedPartNumbers(database: D1Database, mediaId: string): Promise<number[]> {
+  const parts = await database.prepare(`
+    SELECT part_number FROM media_upload_parts WHERE media_id = ?1 ORDER BY part_number
+  `).bind(mediaId).all<{ part_number: number }>();
+  return parts.results.map((part) => part.part_number);
 }
 
 importMediaUploadRoutes.post(
@@ -247,6 +301,10 @@ importMediaUploadRoutes.post(
     }
 
     if (existing?.status === "ready") {
+      const storedObject = await context.env.MEDIA.head(existing.r2_key);
+      if (storedObject?.size !== input.sizeBytes) {
+        return apiError(context, 409, "MEDIA_OBJECT_MISSING", "既有媒體檔案不完整，請先修復儲存空間。");
+      }
       await context.env.DB.batch([
         context.env.DB.prepare(`
           UPDATE media SET owner_subject = ?2, updated_at = ?3 WHERE id = ?1
@@ -264,6 +322,7 @@ importMediaUploadRoutes.post(
           status: "duplicate",
           now,
         }),
+        reconcileImportedEntryStatement(context.env.DB, entryId, now),
       ]);
       const response: StartAppleJournalMediaUploadResponse = {
         id: existing.id,
@@ -273,27 +332,67 @@ importMediaUploadRoutes.post(
       return context.json(response);
     }
 
+    let currentUpload: UploadRow | null = null;
     if (existing) {
+      currentUpload = await uploadRowQuery(context.env.DB, existing.id);
       const storedObject = await context.env.MEDIA.head(existing.r2_key);
       if (storedObject?.size === input.sizeBytes) {
-        await context.env.DB.batch([
-          context.env.DB.prepare(`
-            UPDATE media SET owner_subject = ?2, status = 'ready', updated_at = ?3 WHERE id = ?1
-          `).bind(existing.id, owner, now),
-          context.env.DB.prepare(`
-            INSERT OR IGNORE INTO entry_media (
-              entry_id, media_id, position, placement, caption
-            ) VALUES (?1, ?2, ?3, ?4, ?5)
-          `).bind(entryId, existing.id, input.position, input.placement, input.caption),
-          importItemStatement(context.env.DB, {
-            importId,
-            sourcePath: input.sourcePath,
-            mediaId: existing.id,
-            checksum: input.fingerprint,
-            status: "duplicate",
+        if (currentUpload && currentUpload.status !== "completed") {
+          const reserved = await context.env.DB.prepare(`
+            UPDATE media_uploads SET
+              status = 'completing', active_part = NULL, active_part_expires_at = NULL,
+              state_expires_at = ?5, version = version + 1, updated_at = ?4
+            WHERE media_id = ?1 AND owner_subject = ?2 AND version = ?3
+              AND status IN ('uploading', 'part_uploading', 'completing')
+          `).bind(
+            existing.id,
+            owner,
+            currentUpload.version,
             now,
-          }),
-        ]);
+            new Date(Date.now() + UPLOAD_STATE_LEASE_MS).toISOString(),
+          ).run();
+          if (reserved.meta.changes === 1) {
+            currentUpload = {
+              ...currentUpload,
+              status: "completing",
+              active_part: null,
+              active_part_expires_at: null,
+              state_expires_at: new Date(Date.now() + UPLOAD_STATE_LEASE_MS).toISOString(),
+              version: currentUpload.version + 1,
+            };
+          } else {
+            currentUpload = await uploadRowQuery(context.env.DB, existing.id);
+          }
+        }
+
+        if (currentUpload) {
+          if (currentUpload.status !== "completed") {
+            const finalized = await finalizeUpload(context.env.DB, currentUpload, input.fingerprint);
+            if (!finalized) {
+              return apiError(context, 409, "MEDIA_UPLOAD_BUSY", "媒體正在由另一個上傳工作處理。");
+            }
+          }
+        } else {
+          await context.env.DB.batch([
+            context.env.DB.prepare(`
+              UPDATE media SET owner_subject = ?2, status = 'ready', updated_at = ?3 WHERE id = ?1
+            `).bind(existing.id, owner, now),
+            context.env.DB.prepare(`
+              INSERT OR IGNORE INTO entry_media (
+                entry_id, media_id, position, placement, caption
+              ) VALUES (?1, ?2, ?3, ?4, ?5)
+            `).bind(entryId, existing.id, input.position, input.placement, input.caption),
+            importItemStatement(context.env.DB, {
+              importId,
+              sourcePath: input.sourcePath,
+              mediaId: existing.id,
+              checksum: input.fingerprint,
+              status: "duplicate",
+              now,
+            }),
+            reconcileImportedEntryStatement(context.env.DB, entryId, now),
+          ]);
+        }
         const response: StartAppleJournalMediaUploadResponse = {
           id: existing.id,
           disposition: "duplicate",
@@ -302,33 +401,69 @@ importMediaUploadRoutes.post(
         return context.json(response);
       }
 
-      const currentUpload = await uploadRowQuery(context.env.DB, existing.id);
+      if (
+        currentUpload &&
+        currentUpload.status !== "completed" &&
+        currentUpload.status !== "failed" &&
+        currentUpload.status !== "aborted" &&
+        (!uploadMatchesRoute(currentUpload, { importId, entryId, owner }) ||
+          currentUpload.source_path !== input.sourcePath)
+      ) {
+        return apiError(context, 409, "MEDIA_UPLOAD_BUSY", "相同媒體正在另一篇日記中完成上傳。");
+      }
+
       if (
         currentUpload &&
         uploadMatchesRoute(currentUpload, { importId, entryId, owner }) &&
         currentUpload.source_path === input.sourcePath &&
-        currentUpload.status === "uploading" &&
+        (currentUpload.status === "uploading" || currentUpload.status === "part_uploading") &&
         Date.parse(currentUpload.expires_at) > Date.now()
       ) {
-        const parts = await context.env.DB.prepare(`
-          SELECT part_number FROM media_upload_parts WHERE media_id = ?1 ORDER BY part_number
-        `).bind(existing.id).all<{ part_number: number }>();
-        const response: StartAppleJournalMediaUploadResponse = {
-          id: existing.id,
-          disposition: "uploading",
-          partSize: currentUpload.part_size,
-          partCount: currentUpload.part_count,
-          uploadedParts: parts.results.map((part) => part.part_number),
-        };
+        const response = uploadResponse(
+          currentUpload,
+          await uploadedPartNumbers(context.env.DB, existing.id),
+        );
         noStore(context);
         return context.json(response);
       }
 
-      if (currentUpload && currentUpload.status !== "completed") {
+      if (currentUpload?.status === "completing" || currentUpload?.status === "aborting") {
+        return apiError(context, 409, "MEDIA_UPLOAD_BUSY", "媒體正在由另一個上傳工作處理。");
+      }
+
+      if (
+        currentUpload &&
+        currentUpload.status !== "completed" &&
+        currentUpload.status !== "failed" &&
+        currentUpload.status !== "aborted"
+      ) {
+        const claimed = await context.env.DB.prepare(`
+          UPDATE media_uploads SET
+            status = 'aborting', active_part = NULL, active_part_expires_at = NULL,
+            state_expires_at = ?5, version = version + 1, updated_at = ?4
+          WHERE media_id = ?1 AND owner_subject = ?2 AND version = ?3
+            AND status IN ('uploading', 'part_uploading')
+        `).bind(
+          existing.id,
+          owner,
+          currentUpload.version,
+          now,
+          new Date(Date.now() + UPLOAD_STATE_LEASE_MS).toISOString(),
+        ).run();
+        if (claimed.meta.changes !== 1) {
+          return apiError(context, 409, "MEDIA_UPLOAD_BUSY", "媒體正在由另一個上傳工作處理。");
+        }
         await context.env.MEDIA
           .resumeMultipartUpload(currentUpload.r2_key, currentUpload.upload_id)
           .abort()
           .catch(() => undefined);
+        await context.env.DB.prepare(`
+          UPDATE media_uploads SET
+            status = 'aborted', state_expires_at = NULL,
+            version = version + 1, updated_at = ?4
+          WHERE media_id = ?1 AND owner_subject = ?2 AND version = ?3 AND status = 'aborting'
+        `).bind(existing.id, owner, currentUpload.version + 1, now).run();
+        currentUpload = await uploadRowQuery(context.env.DB, existing.id);
       }
     }
 
@@ -340,19 +475,81 @@ importMediaUploadRoutes.post(
     const expiresAt = new Date(Date.now() + UPLOAD_TTL_MS).toISOString();
 
     try {
-      const statements: D1PreparedStatement[] = [
-        context.env.DB.prepare(`DELETE FROM media_uploads WHERE media_id = ?1`).bind(mediaId),
-      ];
+      const statements: D1PreparedStatement[] = [];
       if (existing) {
-        statements.unshift(
+        if (currentUpload) {
+          statements.push(
+            context.env.DB.prepare(`
+              UPDATE media_uploads SET
+                import_id = ?2, entry_id = ?3, owner_subject = ?4, source_path = ?5,
+                upload_id = ?6, part_size = ?7, part_count = ?8, position = ?9,
+                placement = ?10, caption = ?11, status = 'uploading',
+                version = version + 1, next_part = 1, active_part = NULL,
+                active_part_expires_at = NULL, state_expires_at = NULL, expires_at = ?12,
+                created_at = ?13, updated_at = ?13
+              WHERE media_id = ?1 AND version = ?14 AND status IN ('failed', 'aborted')
+            `).bind(
+              mediaId,
+              importId,
+              entryId,
+              owner,
+              input.sourcePath,
+              multipart.uploadId,
+              MULTIPART_PART_BYTES,
+              partCount,
+              input.position,
+              input.placement,
+              input.caption,
+              expiresAt,
+              now,
+              currentUpload.version,
+            ),
+          );
+        } else {
+          statements.push(
+            context.env.DB.prepare(`
+              INSERT INTO media_uploads (
+                media_id, import_id, entry_id, owner_subject, source_path, upload_id,
+                part_size, part_count, position, placement, caption, status,
+                expires_at, created_at, updated_at
+              ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                'uploading', ?12, ?13, ?13
+              )
+            `).bind(
+              mediaId,
+              importId,
+              entryId,
+              owner,
+              input.sourcePath,
+              multipart.uploadId,
+              MULTIPART_PART_BYTES,
+              partCount,
+              input.position,
+              input.placement,
+              input.caption,
+              expiresAt,
+              now,
+            ),
+          );
+        }
+        statements.push(
+          context.env.DB.prepare(`
+            DELETE FROM media_upload_parts
+            WHERE media_id = ?1 AND EXISTS (
+              SELECT 1 FROM media_uploads WHERE media_id = ?1 AND upload_id = ?2
+            )
+          `).bind(mediaId, multipart.uploadId),
           context.env.DB.prepare(`
             UPDATE media SET
               owner_subject = ?2, status = 'uploading', updated_at = ?3
-            WHERE id = ?1
-          `).bind(mediaId, owner, now),
+            WHERE id = ?1 AND EXISTS (
+              SELECT 1 FROM media_uploads WHERE media_id = ?1 AND upload_id = ?4
+            )
+          `).bind(mediaId, owner, now, multipart.uploadId),
         );
       } else {
-        statements.unshift(
+        statements.push(
           context.env.DB.prepare(`
             INSERT INTO media (
               id, r2_key, storage_kind, sha256, type, mime_type, size_bytes,
@@ -368,33 +565,33 @@ importMediaUploadRoutes.post(
             owner,
             now,
           ),
+          context.env.DB.prepare(`
+            INSERT INTO media_uploads (
+              media_id, import_id, entry_id, owner_subject, source_path, upload_id,
+              part_size, part_count, position, placement, caption, status,
+              expires_at, created_at, updated_at
+            ) VALUES (
+              ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+              'uploading', ?12, ?13, ?13
+            )
+          `).bind(
+            mediaId,
+            importId,
+            entryId,
+            owner,
+            input.sourcePath,
+            multipart.uploadId,
+            MULTIPART_PART_BYTES,
+            partCount,
+            input.position,
+            input.placement,
+            input.caption,
+            expiresAt,
+            now,
+          ),
         );
       }
       statements.push(
-        context.env.DB.prepare(`
-          INSERT INTO media_uploads (
-            media_id, import_id, entry_id, owner_subject, source_path, upload_id,
-            part_size, part_count, position, placement, caption, status,
-            expires_at, created_at, updated_at
-          ) VALUES (
-            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
-            'uploading', ?12, ?13, ?13
-          )
-        `).bind(
-          mediaId,
-          importId,
-          entryId,
-          owner,
-          input.sourcePath,
-          multipart.uploadId,
-          MULTIPART_PART_BYTES,
-          partCount,
-          input.position,
-          input.placement,
-          input.caption,
-          expiresAt,
-          now,
-        ),
         importItemStatement(context.env.DB, {
           importId,
           sourcePath: input.sourcePath,
@@ -404,10 +601,47 @@ importMediaUploadRoutes.post(
           now,
         }),
       );
-      await context.env.DB.batch(statements);
-    } catch (error) {
+      const results = await context.env.DB.batch(statements);
+      if (results[0]?.meta.changes !== 1) {
+        await multipart.abort().catch(() => undefined);
+        const winner = await uploadRowQuery(context.env.DB, mediaId);
+        if (
+          winner &&
+          uploadMatchesRoute(winner, { importId, entryId, owner }) &&
+          winner.source_path === input.sourcePath &&
+          (winner.status === "uploading" || winner.status === "part_uploading")
+        ) {
+          const response = uploadResponse(
+            winner,
+            await uploadedPartNumbers(context.env.DB, mediaId),
+          );
+          noStore(context);
+          return context.json(response);
+        }
+        return apiError(context, 409, "MEDIA_UPLOAD_BUSY", "媒體正在由另一個上傳工作處理。");
+      }
+    } catch {
       await multipart.abort().catch(() => undefined);
-      throw error;
+      const winnerMedia = await context.env.DB.prepare(`
+        SELECT id FROM media WHERE sha256 = ?1
+      `).bind(input.fingerprint).first<{ id: string }>();
+      const winner = winnerMedia
+        ? await uploadRowQuery(context.env.DB, winnerMedia.id)
+        : null;
+      if (
+        winner &&
+        uploadMatchesRoute(winner, { importId, entryId, owner }) &&
+        winner.source_path === input.sourcePath &&
+        (winner.status === "uploading" || winner.status === "part_uploading")
+      ) {
+        const response = uploadResponse(
+          winner,
+          await uploadedPartNumbers(context.env.DB, winner.media_id),
+        );
+        noStore(context);
+        return context.json(response);
+      }
+      return apiError(context, 500, "MEDIA_UPLOAD_START_FAILED", "媒體上傳工作建立失敗，可以重試。");
     }
 
     const response: StartAppleJournalMediaUploadResponse = {
@@ -444,23 +678,7 @@ importMediaUploadRoutes.put(
     ) {
       return apiError(context, 400, "INVALID_PART_NUMBER", "媒體分段編號不正確。");
     }
-    if (upload.status !== "uploading" || upload.media_status === "ready") {
-      return apiError(context, 409, "MEDIA_UPLOAD_CLOSED", "這個媒體上傳工作已經結束。");
-    }
     if (Date.parse(upload.expires_at) <= Date.now()) {
-      await context.env.MEDIA
-        .resumeMultipartUpload(upload.r2_key, upload.upload_id)
-        .abort()
-        .catch(() => undefined);
-      const now = new Date().toISOString();
-      await context.env.DB.batch([
-        context.env.DB.prepare(`
-          UPDATE media SET status = 'failed', updated_at = ?2 WHERE id = ?1
-        `).bind(mediaId, now),
-        context.env.DB.prepare(`
-          UPDATE media_uploads SET status = 'failed', updated_at = ?2 WHERE media_id = ?1
-        `).bind(mediaId, now),
-      ]);
       return apiError(context, 409, "MEDIA_UPLOAD_EXPIRED", "媒體上傳已過期，請重新開始。");
     }
 
@@ -474,9 +692,20 @@ importMediaUploadRoutes.put(
       noStore(context);
       return context.json(response);
     }
-    const nextPart = (parts.results.at(-1)?.part_number ?? 0) + 1;
-    if (partNumber !== nextPart) {
+    if (upload.media_status === "ready" || upload.status === "completed") {
+      return apiError(context, 409, "MEDIA_UPLOAD_CLOSED", "這個媒體上傳工作已經結束。");
+    }
+    if (partNumber !== upload.next_part) {
       return apiError(context, 409, "MEDIA_PART_OUT_OF_ORDER", "媒體分段必須依序上傳。");
+    }
+    const now = new Date();
+    const staleReservation =
+      upload.status === "part_uploading" &&
+      upload.active_part === partNumber &&
+      upload.active_part_expires_at !== null &&
+      Date.parse(upload.active_part_expires_at) <= now.getTime();
+    if (upload.status !== "uploading" && !staleReservation) {
+      return apiError(context, 409, "MEDIA_PART_BUSY", "這個媒體分段正在由另一個請求處理。");
     }
 
     const declaredSize = Number(context.req.header("X-Media-Size") ?? 0);
@@ -500,26 +729,106 @@ importMediaUploadRoutes.put(
       }
     }
 
+    const nowIso = now.toISOString();
+    const leaseExpiresAt = new Date(now.getTime() + PART_UPLOAD_LEASE_MS).toISOString();
+    const reserved = await context.env.DB.prepare(`
+      UPDATE media_uploads SET
+        status = 'part_uploading', active_part = ?4, active_part_expires_at = ?5,
+        version = version + 1, updated_at = ?6
+      WHERE media_id = ?1 AND owner_subject = ?2 AND version = ?3 AND next_part = ?4
+        AND (
+          status = 'uploading'
+          OR (
+            status = 'part_uploading' AND active_part = ?4
+            AND active_part_expires_at <= ?6
+          )
+        )
+    `).bind(mediaId, owner, upload.version, partNumber, leaseExpiresAt, nowIso).run();
+    if (reserved.meta.changes !== 1) {
+      await body.cancel().catch(() => undefined);
+      const completedPart = await context.env.DB.prepare(`
+        SELECT part_number FROM media_upload_parts
+        WHERE media_id = ?1 AND part_number = ?2
+      `).bind(mediaId, partNumber).first<{ part_number: number }>();
+      if (completedPart) {
+        const response: UploadAppleJournalMediaPartResponse = { partNumber };
+        noStore(context);
+        return context.json(response);
+      }
+      return apiError(context, 409, "MEDIA_PART_BUSY", "這個媒體分段正在由另一個請求處理。");
+    }
+    const reservationVersion = upload.version + 1;
+    const releaseReservation = async (): Promise<void> => {
+      await context.env.DB.prepare(`
+        UPDATE media_uploads SET
+          status = 'uploading', active_part = NULL, active_part_expires_at = NULL,
+          version = version + 1, updated_at = ?4
+        WHERE media_id = ?1 AND owner_subject = ?2
+          AND version = ?3 AND status = 'part_uploading'
+      `).bind(mediaId, owner, reservationVersion, new Date().toISOString()).run();
+    };
+
     let part: R2UploadedPart;
     try {
       part = await context.env.MEDIA
         .resumeMultipartUpload(upload.r2_key, upload.upload_id)
         .uploadPart(partNumber, body);
     } catch {
+      await releaseReservation();
       return apiError(context, 500, "MEDIA_PART_UPLOAD_FAILED", "媒體分段上傳失敗，可以稍後重試。");
     }
     if (!ETAG_PATTERN.test(part.etag)) {
+      await releaseReservation();
       return apiError(context, 500, "INVALID_MEDIA_PART_ETAG", "媒體分段驗證失敗，可以稍後重試。");
     }
 
-    await context.env.DB.prepare(`
-      INSERT INTO media_upload_parts (media_id, part_number, etag, size_bytes, updated_at)
-      VALUES (?1, ?2, ?3, ?4, ?5)
-      ON CONFLICT(media_id, part_number) DO UPDATE SET
-        etag = excluded.etag,
-        size_bytes = excluded.size_bytes,
-        updated_at = excluded.updated_at
-    `).bind(mediaId, partNumber, part.etag, requiredSize, new Date().toISOString()).run();
+    try {
+      const committedAt = new Date().toISOString();
+      const results = await context.env.DB.batch([
+        context.env.DB.prepare(`
+          INSERT INTO media_upload_parts (
+            media_id, part_number, etag, size_bytes, updated_at
+          )
+          SELECT ?1, ?2, ?3, ?4, ?6
+          FROM media_uploads
+          WHERE media_id = ?1 AND owner_subject = ?5 AND version = ?7
+            AND status = 'part_uploading' AND active_part = ?2
+          ON CONFLICT(media_id, part_number) DO UPDATE SET
+            etag = excluded.etag,
+            size_bytes = excluded.size_bytes,
+            updated_at = excluded.updated_at
+        `).bind(
+          mediaId,
+          partNumber,
+          part.etag,
+          requiredSize,
+          owner,
+          committedAt,
+          reservationVersion,
+        ),
+        context.env.DB.prepare(`
+          UPDATE media_uploads SET
+            status = 'uploading', next_part = ?4, active_part = NULL,
+            active_part_expires_at = NULL, version = version + 1, updated_at = ?5
+          WHERE media_id = ?1 AND owner_subject = ?2 AND version = ?3
+            AND status = 'part_uploading' AND active_part = ?6
+        `).bind(
+          mediaId,
+          owner,
+          reservationVersion,
+          partNumber + 1,
+          committedAt,
+          partNumber,
+        ),
+      ]);
+      if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
+        await releaseReservation();
+        return apiError(context, 409, "MEDIA_PART_STATE_CHANGED", "媒體分段狀態已更新，請重新續傳。");
+      }
+    } catch {
+      await releaseReservation();
+      return apiError(context, 500, "MEDIA_PART_COMMIT_FAILED", "媒體分段已收到，但狀態保存失敗，可以重試。");
+    }
 
     const response: UploadAppleJournalMediaPartResponse = { partNumber };
     noStore(context);
@@ -536,7 +845,7 @@ importMediaUploadRoutes.post(
     const importId = context.req.param("importId");
     const entryId = context.req.param("entryId");
     const mediaId = context.req.param("mediaId");
-    const upload = await uploadRowQuery(context.env.DB, mediaId);
+    let upload = await uploadRowQuery(context.env.DB, mediaId);
     if (!upload || !uploadMatchesRoute(upload, { importId, entryId, owner })) {
       return apiError(context, 404, "MEDIA_UPLOAD_NOT_FOUND", "找不到這個媒體上傳工作。");
     }
@@ -545,7 +854,7 @@ importMediaUploadRoutes.post(
       noStore(context);
       return context.json(response);
     }
-    if (upload.status === "aborted" || upload.status === "failed") {
+    if (upload.status === "aborted" || upload.status === "failed" || upload.status === "aborting") {
       return apiError(context, 409, "MEDIA_UPLOAD_CLOSED", "這個媒體上傳工作已經結束。");
     }
 
@@ -554,13 +863,44 @@ importMediaUploadRoutes.post(
       .first<{ sha256: string }>();
     if (!media) return apiError(context, 404, "MEDIA_UPLOAD_NOT_FOUND", "找不到這個媒體上傳工作。");
 
-    const storedObject = await context.env.MEDIA.head(upload.r2_key);
-    if (storedObject?.size === upload.size_bytes) {
-      await finalizeUpload(context.env.DB, upload, media.sha256);
-      const response: ImportAppleJournalMediaResponse = { id: mediaId, disposition: "inserted" };
-      noStore(context);
-      return context.json(response);
+    let storedObject = await context.env.MEDIA.head(upload.r2_key);
+    if (upload.status === "completing") {
+      if (storedObject?.size === upload.size_bytes) {
+        const finalized = await finalizeUpload(context.env.DB, upload, media.sha256);
+        if (finalized) {
+          const response: ImportAppleJournalMediaResponse = { id: mediaId, disposition: "inserted" };
+          noStore(context);
+          return context.json(response);
+        }
+      }
+      const stateExpired =
+        upload.state_expires_at !== null &&
+        Date.parse(upload.state_expires_at) <= Date.now();
+      if (!stateExpired) {
+        return apiError(context, 409, "MEDIA_UPLOAD_BUSY", "媒體正在完成上傳，請稍後重試。");
+      }
+      const releasedAt = new Date().toISOString();
+      const released = await context.env.DB.prepare(`
+        UPDATE media_uploads SET
+          status = 'uploading', state_expires_at = NULL,
+          version = version + 1, updated_at = ?4
+        WHERE media_id = ?1 AND owner_subject = ?2 AND version = ?3
+          AND status = 'completing' AND state_expires_at <= ?4
+      `).bind(mediaId, owner, upload.version, releasedAt).run();
+      if (released.meta.changes !== 1) {
+        return apiError(context, 409, "MEDIA_UPLOAD_BUSY", "媒體正在完成上傳，請稍後重試。");
+      }
+      upload = {
+        ...upload,
+        status: "uploading",
+        state_expires_at: null,
+        version: upload.version + 1,
+      };
     }
+    if (upload.status !== "uploading") {
+      return apiError(context, 409, "MEDIA_UPLOAD_BUSY", "媒體正在由另一個請求處理。");
+    }
+    const reservableUpload = upload;
 
     const parts = await context.env.DB.prepare(`
       SELECT part_number, etag, size_bytes
@@ -569,62 +909,125 @@ importMediaUploadRoutes.post(
     const completeParts = parts.results.every(
       (part, index) =>
         part.part_number === index + 1 &&
-        part.size_bytes === expectedPartSize(upload, part.part_number) &&
+        part.size_bytes === expectedPartSize(reservableUpload, part.part_number) &&
         ETAG_PATTERN.test(part.etag),
     );
-    if (parts.results.length !== upload.part_count || !completeParts) {
+    if (
+      parts.results.length !== reservableUpload.part_count ||
+      !completeParts ||
+      reservableUpload.next_part !== reservableUpload.part_count + 1
+    ) {
       return apiError(context, 409, "MEDIA_UPLOAD_INCOMPLETE", "媒體尚未完整上傳，可以從中斷處繼續。");
     }
 
-    await context.env.DB.prepare(`
-      UPDATE media_uploads SET status = 'completing', updated_at = ?2 WHERE media_id = ?1
-    `).bind(mediaId, new Date().toISOString()).run();
+    const reservedAt = new Date().toISOString();
+    const stateExpiresAt = new Date(Date.now() + UPLOAD_STATE_LEASE_MS).toISOString();
+    const reserved = await context.env.DB.prepare(`
+      UPDATE media_uploads SET
+        status = 'completing', state_expires_at = ?6,
+        version = version + 1, updated_at = ?5
+      WHERE media_id = ?1 AND owner_subject = ?2 AND version = ?3
+        AND status = 'uploading' AND next_part = ?4
+    `).bind(
+      mediaId,
+      owner,
+      reservableUpload.version,
+      reservableUpload.part_count + 1,
+      reservedAt,
+      stateExpiresAt,
+    ).run();
+    if (reserved.meta.changes !== 1) {
+      upload = await uploadRowQuery(context.env.DB, mediaId);
+      if (upload?.status === "completed" && upload.media_status === "ready") {
+        const response: ImportAppleJournalMediaResponse = { id: mediaId, disposition: "inserted" };
+        noStore(context);
+        return context.json(response);
+      }
+      if (upload?.status === "completing") {
+        storedObject = await context.env.MEDIA.head(upload.r2_key);
+        if (storedObject?.size === upload.size_bytes) {
+          const finalized = await finalizeUpload(context.env.DB, upload, media.sha256);
+          if (finalized) {
+            const response: ImportAppleJournalMediaResponse = { id: mediaId, disposition: "inserted" };
+            noStore(context);
+            return context.json(response);
+          }
+        }
+      }
+      return apiError(context, 409, "MEDIA_UPLOAD_BUSY", "媒體正在由另一個請求完成上傳。");
+    }
+    upload = {
+      ...reservableUpload,
+      status: "completing",
+      state_expires_at: stateExpiresAt,
+      version: reservableUpload.version + 1,
+    };
 
     let completedSizeMismatch = false;
-    try {
-      const object = await context.env.MEDIA
-        .resumeMultipartUpload(upload.r2_key, upload.upload_id)
-        .complete(parts.results.map((part) => ({
-          partNumber: part.part_number,
-          etag: part.etag,
-        })));
-      if (object.size !== upload.size_bytes) {
-        await context.env.MEDIA.delete(upload.r2_key);
-        completedSizeMismatch = true;
-        throw new Error("Completed multipart object has the wrong size");
-      }
-    } catch {
-      if (completedSizeMismatch) {
-        const now = new Date().toISOString();
-        await context.env.DB.batch([
-          context.env.DB.prepare(`
-            UPDATE media SET status = 'failed', updated_at = ?2 WHERE id = ?1
-          `).bind(mediaId, now),
-          context.env.DB.prepare(`
-            UPDATE media_uploads SET status = 'failed', updated_at = ?2 WHERE media_id = ?1
-          `).bind(mediaId, now),
-          importItemStatement(context.env.DB, {
-            importId,
-            sourcePath: upload.source_path,
-            mediaId,
-            checksum: media.sha256,
-            status: "failed",
-            errorCode: "MEDIA_SIZE_MISMATCH",
-            now,
-          }),
-        ]);
-        return apiError(context, 500, "MEDIA_SIZE_MISMATCH", "媒體大小驗證失敗，請重新開始上傳。");
-      }
-      const completedObject = await context.env.MEDIA.head(upload.r2_key);
-      if (completedObject?.size !== upload.size_bytes) {
-        await context.env.DB.prepare(`
-          UPDATE media_uploads SET status = 'uploading', updated_at = ?2 WHERE media_id = ?1
-        `).bind(mediaId, new Date().toISOString()).run();
-        return apiError(context, 500, "MEDIA_UPLOAD_COMPLETE_FAILED", "媒體完成上傳失敗，可以稍後重試。");
+    if (storedObject?.size !== upload.size_bytes) {
+      try {
+        const object = await context.env.MEDIA
+          .resumeMultipartUpload(upload.r2_key, upload.upload_id)
+          .complete(parts.results.map((part) => ({
+            partNumber: part.part_number,
+            etag: part.etag,
+          })));
+        if (object.size !== upload.size_bytes) {
+          await context.env.MEDIA.delete(upload.r2_key);
+          completedSizeMismatch = true;
+          throw new Error("Completed multipart object has the wrong size");
+        }
+      } catch {
+        // A retryable R2 failure is distinguished from an already-completed
+        // object by the authoritative head check below.
       }
     }
 
-    await finalizeUpload(context.env.DB, upload, media.sha256);
+    if (completedSizeMismatch) {
+      const failedAt = new Date().toISOString();
+      await context.env.DB.batch([
+        context.env.DB.prepare(`
+          UPDATE media_uploads SET
+            status = 'failed', state_expires_at = NULL,
+            version = version + 1, updated_at = ?4
+          WHERE media_id = ?1 AND owner_subject = ?2
+            AND version = ?3 AND status = 'completing'
+        `).bind(mediaId, owner, upload.version, failedAt),
+        context.env.DB.prepare(`
+          UPDATE media SET status = 'failed', updated_at = ?2
+          WHERE id = ?1 AND EXISTS (
+            SELECT 1 FROM media_uploads WHERE media_id = ?1 AND status = 'failed'
+          )
+        `).bind(mediaId, failedAt),
+        importItemStatement(context.env.DB, {
+          importId,
+          sourcePath: upload.source_path,
+          mediaId,
+          checksum: media.sha256,
+          status: "failed",
+          errorCode: "MEDIA_SIZE_MISMATCH",
+          now: failedAt,
+        }),
+      ]);
+      return apiError(context, 500, "MEDIA_SIZE_MISMATCH", "媒體大小驗證失敗，請重新開始上傳。");
+    }
+
+    storedObject = await context.env.MEDIA.head(upload.r2_key);
+    if (storedObject?.size !== upload.size_bytes) {
+      await context.env.DB.prepare(`
+        UPDATE media_uploads SET
+          status = 'uploading', state_expires_at = NULL,
+          version = version + 1, updated_at = ?4
+        WHERE media_id = ?1 AND owner_subject = ?2
+          AND version = ?3 AND status = 'completing'
+      `).bind(mediaId, owner, upload.version, new Date().toISOString()).run();
+      return apiError(context, 500, "MEDIA_UPLOAD_COMPLETE_FAILED", "媒體完成上傳失敗，可以稍後重試。");
+    }
+
+    const finalized = await finalizeUpload(context.env.DB, upload, media.sha256);
+    if (!finalized) {
+      return apiError(context, 500, "MEDIA_UPLOAD_FINALIZE_FAILED", "媒體已上傳，狀態尚未完成，可以重試。");
+    }
     const response: ImportAppleJournalMediaResponse = { id: mediaId, disposition: "inserted" };
     noStore(context);
     return context.json(response, 201);
@@ -644,7 +1047,45 @@ importMediaUploadRoutes.post(
     if (!upload || !uploadMatchesRoute(upload, { importId, entryId, owner })) {
       return apiError(context, 404, "MEDIA_UPLOAD_NOT_FOUND", "找不到這個媒體上傳工作。");
     }
-    if (upload.status === "completed") return context.body(null, 204);
+    if (upload.status === "completed" || upload.status === "aborted" || upload.status === "failed") {
+      noStore(context);
+      return context.body(null, 204);
+    }
+
+    const nowDate = new Date();
+    const stalePart =
+      upload.status === "part_uploading" &&
+      upload.active_part_expires_at !== null &&
+      Date.parse(upload.active_part_expires_at) <= nowDate.getTime();
+    const staleAbort =
+      upload.status === "aborting" &&
+      upload.state_expires_at !== null &&
+      Date.parse(upload.state_expires_at) <= nowDate.getTime();
+    if (upload.status !== "uploading" && !stalePart && !staleAbort) {
+      return apiError(context, 409, "MEDIA_UPLOAD_BUSY", "媒體正在由另一個請求處理，暫時不能取消。");
+    }
+    const claimedAt = nowDate.toISOString();
+    const stateExpiresAt = new Date(nowDate.getTime() + UPLOAD_STATE_LEASE_MS).toISOString();
+    const claimed = await context.env.DB.prepare(`
+      UPDATE media_uploads SET
+        status = 'aborting', active_part = NULL, active_part_expires_at = NULL,
+        state_expires_at = ?5, version = version + 1, updated_at = ?4
+      WHERE media_id = ?1 AND owner_subject = ?2 AND version = ?3
+        AND (
+          status = 'uploading'
+          OR (status = 'part_uploading' AND active_part_expires_at <= ?4)
+          OR (status = 'aborting' AND state_expires_at <= ?4)
+        )
+    `).bind(mediaId, owner, upload.version, claimedAt, stateExpiresAt).run();
+    if (claimed.meta.changes !== 1) {
+      const current = await uploadRowQuery(context.env.DB, mediaId);
+      if (current?.status === "completed" || current?.status === "aborted" || current?.status === "failed") {
+        noStore(context);
+        return context.body(null, 204);
+      }
+      return apiError(context, 409, "MEDIA_UPLOAD_BUSY", "媒體正在由另一個請求處理，暫時不能取消。");
+    }
+    const abortVersion = upload.version + 1;
 
     await context.env.MEDIA
       .resumeMultipartUpload(upload.r2_key, upload.upload_id)
@@ -653,13 +1094,47 @@ importMediaUploadRoutes.post(
     const media = await context.env.DB.prepare(`SELECT sha256 FROM media WHERE id = ?1`)
       .bind(mediaId)
       .first<{ sha256: string }>();
+    const completedObject = await context.env.MEDIA.head(upload.r2_key);
+    if (media && completedObject?.size === upload.size_bytes) {
+      const completingAt = new Date().toISOString();
+      const completingExpiresAt = new Date(Date.now() + UPLOAD_STATE_LEASE_MS).toISOString();
+      const recovered = await context.env.DB.prepare(`
+        UPDATE media_uploads SET
+          status = 'completing', state_expires_at = ?5,
+          version = version + 1, updated_at = ?4
+        WHERE media_id = ?1 AND owner_subject = ?2
+          AND version = ?3 AND status = 'aborting'
+      `).bind(mediaId, owner, abortVersion, completingAt, completingExpiresAt).run();
+      if (recovered.meta.changes === 1) {
+        await finalizeUpload(
+          context.env.DB,
+          {
+            ...upload,
+            status: "completing",
+            state_expires_at: completingExpiresAt,
+            version: abortVersion + 1,
+          },
+          media.sha256,
+        );
+      }
+      noStore(context);
+      return context.body(null, 204);
+    }
+
     const now = new Date().toISOString();
     await context.env.DB.batch([
       context.env.DB.prepare(`
-        UPDATE media SET status = 'failed', updated_at = ?2 WHERE id = ?1
-      `).bind(mediaId, now),
+        UPDATE media_uploads SET
+          status = 'aborted', state_expires_at = NULL,
+          version = version + 1, updated_at = ?4
+        WHERE media_id = ?1 AND owner_subject = ?2
+          AND version = ?3 AND status = 'aborting'
+      `).bind(mediaId, owner, abortVersion, now),
       context.env.DB.prepare(`
-        UPDATE media_uploads SET status = 'aborted', updated_at = ?2 WHERE media_id = ?1
+        UPDATE media SET status = 'failed', updated_at = ?2
+        WHERE id = ?1 AND EXISTS (
+          SELECT 1 FROM media_uploads WHERE media_id = ?1 AND status = 'aborted'
+        )
       `).bind(mediaId, now),
       importItemStatement(context.env.DB, {
         importId,
@@ -670,6 +1145,7 @@ importMediaUploadRoutes.post(
         errorCode: "UPLOAD_ABORTED",
         now,
       }),
+      reconcileImportedEntryStatement(context.env.DB, entryId, now),
     ]);
     noStore(context);
     return context.body(null, 204);

@@ -12,6 +12,7 @@ import type {
 import { buildExcerpt, countWords } from "../lib/entry-content";
 import { apiError, noStore } from "../lib/http";
 import type { AuthVariables } from "../lib/auth/middleware";
+import { reconcileImportedEntryStatement } from "../lib/import-status";
 import {
   mediaR2Key,
   parseMediaUpload,
@@ -28,6 +29,7 @@ const startImportSchema = z.object({
 
 const importEntrySchema = z.object({
   sourcePath: z.string().trim().min(1).max(1_000),
+  mediaCount: z.number().int().min(0).max(10_000),
   title: z.string().trim().min(1).max(180),
   body: z.string().max(100_000),
   occurredAt: z.iso.datetime(),
@@ -211,6 +213,10 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
 
   if (duplicate) {
     await context.env.DB.batch([
+      context.env.DB.prepare(`
+        UPDATE entries SET expected_media_count = ?2, deleted_at = NULL, updated_at = ?3
+        WHERE id = ?1
+      `).bind(entryId, input.mediaCount, now),
       importItemStatement(context.env.DB, {
         id: crypto.randomUUID(),
         importId,
@@ -221,6 +227,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
         status: "duplicate",
         now,
       }),
+      reconcileImportedEntryStatement(context.env.DB, entryId, now),
     ]);
   } else if (existing) {
     await context.env.DB.batch([
@@ -237,8 +244,9 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
           mood = ?10,
           layout_seed = ?11,
           word_count = ?12,
-          status = 'published',
-          updated_at = ?13,
+          expected_media_count = ?13,
+          status = 'partial-import',
+          updated_at = ?14,
           deleted_at = NULL
         WHERE id = ?1
       `).bind(
@@ -254,6 +262,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
         input.mood,
         wordCount % 97,
         wordCount,
+        input.mediaCount,
         now,
       ),
       context.env.DB.prepare(`DELETE FROM entry_blocks WHERE entry_id = ?1`).bind(entryId),
@@ -276,6 +285,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
         status: "completed",
         now,
       }),
+      reconcileImportedEntryStatement(context.env.DB, entryId, now),
     ]);
   } else {
     await context.env.DB.batch([
@@ -283,10 +293,12 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
         INSERT INTO entries (
           id, journal_id, source, source_id, source_hash, title, excerpt,
           occurred_at, timezone, local_date, location_name, mood, layout_seed,
-          word_count, status, created_at, updated_at
+          word_count, expected_media_count, status, created_at, updated_at
         ) VALUES (
           ?1, 'journal-everyday', 'apple_journal', ?2, ?3, ?4, ?5,
-          ?6, ?7, ?8, ?9, ?10, ?11, ?12, 'published', ?13, ?13
+          ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+          CASE WHEN ?13 = 0 THEN 'published' ELSE 'partial-import' END,
+          ?14, ?14
         )
       `).bind(
         entryId,
@@ -301,6 +313,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
         input.mood,
         wordCount % 97,
         wordCount,
+        input.mediaCount,
         now,
       ),
       context.env.DB.prepare(`
@@ -387,6 +400,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries/:entryId/media", asy
         status: "duplicate",
         now,
       }),
+      reconcileImportedEntryStatement(context.env.DB, entryId, now),
     ]);
 
     const response: ImportAppleJournalMediaResponse = {
@@ -436,6 +450,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries/:entryId/media", asy
         status: "completed",
         now,
       }),
+      reconcileImportedEntryStatement(context.env.DB, entryId, now),
     ]);
     const response: ImportAppleJournalMediaResponse = {
       id: existingMedia.id,
@@ -475,6 +490,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries/:entryId/media", asy
         status: "completed",
         now,
       }),
+      reconcileImportedEntryStatement(context.env.DB, entryId, now),
     ],
     failureStatements: [
       importItemStatement(context.env.DB, {

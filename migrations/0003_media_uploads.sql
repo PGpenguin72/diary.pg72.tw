@@ -2,6 +2,8 @@
 PRAGMA foreign_keys = ON;
 
 ALTER TABLE media ADD COLUMN owner_subject TEXT;
+ALTER TABLE entries ADD COLUMN expected_media_count INTEGER NOT NULL DEFAULT 0
+  CHECK (expected_media_count BETWEEN 0 AND 10000);
 
 CREATE INDEX media_owner_subject_idx ON media (owner_subject);
 
@@ -18,14 +20,32 @@ CREATE TABLE media_uploads (
   placement TEXT NOT NULL CHECK (placement IN ('inline', 'grid', 'cover')),
   caption TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL CHECK (
-    status IN ('uploading', 'completing', 'completed', 'failed', 'aborted')
+    status IN (
+      'uploading', 'part_uploading', 'completing', 'aborting',
+      'completed', 'failed', 'aborted'
+    )
   ),
+  version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
+  next_part INTEGER NOT NULL DEFAULT 1 CHECK (next_part BETWEEN 1 AND 10001),
+  active_part INTEGER CHECK (active_part BETWEEN 1 AND 10000),
+  active_part_expires_at TEXT,
+  state_expires_at TEXT,
   expires_at TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   FOREIGN KEY (media_id) REFERENCES media(id) ON DELETE CASCADE,
   FOREIGN KEY (import_id) REFERENCES imports(id) ON DELETE CASCADE,
-  FOREIGN KEY (entry_id) REFERENCES entries(id) ON DELETE CASCADE
+  FOREIGN KEY (entry_id) REFERENCES entries(id) ON DELETE CASCADE,
+  CHECK (
+    (status = 'part_uploading' AND active_part IS NOT NULL AND active_part_expires_at IS NOT NULL)
+    OR
+    (status <> 'part_uploading' AND active_part IS NULL AND active_part_expires_at IS NULL)
+  ),
+  CHECK (
+    (status IN ('completing', 'aborting') AND state_expires_at IS NOT NULL)
+    OR
+    (status NOT IN ('completing', 'aborting') AND state_expires_at IS NULL)
+  )
 );
 
 CREATE INDEX media_uploads_import_status_idx

@@ -130,6 +130,7 @@ describe("diary Worker API", () => {
 
     const entryBody = JSON.stringify({
       sourcePath: "AppleJournalEntries/Entries/2024-11-03.html",
+      mediaCount: 1,
       title: "合成匯入日記",
       body: "這是沒有私人資料的測試內容。",
       occurredAt: "2024-11-03T12:00:00.000Z",
@@ -149,6 +150,11 @@ describe("diary Worker API", () => {
     expect(entryResponse.status).toBe(201);
     expect(imported.disposition).toBe("inserted");
 
+    const hiddenWhileIncomplete = await exports.default.fetch(
+      new Request(`http://localhost/api/entries/${imported.id}`),
+    );
+    expect(hiddenWhileIncomplete.status).toBe(404);
+
     const mediaFingerprint = "b".repeat(64);
     const mediaResponse = await exports.default.fetch(
       new Request(
@@ -165,6 +171,11 @@ describe("diary Worker API", () => {
       ),
     );
     expect(mediaResponse.status).toBe(201);
+
+    const visibleAfterMedia = await exports.default.fetch(
+      new Request(`http://localhost/api/entries/${imported.id}`),
+    );
+    expect(visibleAfterMedia.status).toBe(200);
 
     const duplicateResponse = await exports.default.fetch(
       new Request(`http://localhost/api/imports/apple-journal/${importJob.id}/entries`, {

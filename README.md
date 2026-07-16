@@ -209,12 +209,14 @@ flowchart TD
 - 已實作：每篇 entry 獨立 upsert；zip.js 以 `WritableStream` + backpressure 串流解壓媒體，瀏覽器只組成目前的 8 MiB part，不先建立整個大型媒體 Blob。Worker 再以 owner-bound R2 multipart session 寫入 private R2。非最後一段符合 R2 的 5 MiB 下限，單次 request 明確低於 Cloudflare 100 MB 的最低方案上限。
 - 已實作：import job 記錄進度；重新選擇同一個 ZIP 會依 central-directory fingerprint、source path 與 canonical content hash 去重。
 - 已實作：每段最多重試三次；D1 保存 opaque R2 ETag 與已完成 part，重新選擇同一 ZIP 可從中斷處繼續。完成、取消與過期 session 都有明確狀態，failed media row 不再被誤判成成功 duplicate。
+- 已實作：part、complete 與 abort 以 D1 version/next-part compare-and-set 互斥；part reservation 有短 lease，Worker 在 R2 寫入前後中止時可由同一 part 安全接管並重寫。R2 已完成但 D1 尚未 finalize 時，以 private object head 重試 reconciliation。
 - 已實作：multipart object key 與 upload ID 只由 Worker 產生及保存，綁定 import、entry 與 PG72 ID `sub`；瀏覽器不能指定任意 R2 key。第一段會再次做 magic-signature / MIME 驗證。
 - 待實作：若未來需要減少 Worker 流量，可改用 object-scoped presigned upload；目前不需要 R2 API credential 或跨網域 CORS。
 - 待實作：排程清除 D1 中已 completed / aborted / 過期的 upload bookkeeping。R2 未完成 multipart 預設會自動於 7 天後 abort；重試同一媒體時也會 opportunistic abort 舊 session。
 - 已實作：原始 ZIP 不會送進 Worker 或永久保存，避免同一份媒體占兩倍空間。
 - 待實作：可選的加密原始匯入備份。
 - 每一篇 entry 獨立 commit。某個附件失敗不能讓已完成的數百篇全部 rollback。
+- 有附件的 imported entry 先保持 `partial-import` 且不由公開 read route 提供；只有預期附件全部連到 ready media 後，才在同一 D1 batch 轉為 `published`。
 
 ### 冪等性與安全
 
