@@ -1,5 +1,6 @@
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
+import { cleanupQueuedMedia } from "../worker/routes/import-media-uploads";
 
 describe("diary Worker API", () => {
   it("returns an empty overview after applying migrations", async () => {
@@ -298,15 +299,18 @@ describe("diary Worker API", () => {
 
     const first = await postEntry(entryInput);
     expect(first.response.status).toBe(201);
-    expect(
-      (await uploadMedia(
-        first.body.id,
-        first.body.generationId,
-        "1".repeat(64),
-        "Synthetic/Resources/old.png",
-        png,
-      )).status,
-    ).toBe(201);
+    const firstMediaResponse = await uploadMedia(
+      first.body.id,
+      first.body.generationId,
+      "1".repeat(64),
+      "Synthetic/Resources/old.png",
+      png,
+    );
+    expect(firstMediaResponse.status).toBe(201);
+    const firstMedia = await firstMediaResponse.json<{ id: string }>();
+    const firstMediaRow = await env.DB.prepare(`SELECT r2_key FROM media WHERE id = ?1`)
+      .bind(firstMedia.id)
+      .first<{ r2_key: string }>();
     expect(
       (await exports.default.fetch(new Request(`http://localhost/api/entries/${first.body.id}`))).status,
     ).toBe(200);
@@ -374,5 +378,20 @@ describe("diary Worker API", () => {
       WHERE entry_id = ?1 AND import_generation_id = ?2
     `).bind(first.body.id, retry.body.generationId).all<{ import_generation_id: string }>();
     expect(currentLinks.results).toHaveLength(1);
+    expect(
+      await env.DB.prepare(`
+        SELECT media_id FROM entry_media WHERE entry_id = ?1 AND media_id = ?2
+      `).bind(first.body.id, firstMedia.id).first(),
+    ).toBeNull();
+    expect(
+      await env.DB.prepare(`SELECT media_id FROM media_cleanup_queue WHERE media_id = ?1`)
+        .bind(firstMedia.id)
+        .first(),
+    ).not.toBeNull();
+    expect(await cleanupQueuedMedia(env)).toMatchObject({ deleted: 1, failed: 0 });
+    expect(
+      await env.DB.prepare(`SELECT id FROM media WHERE id = ?1`).bind(firstMedia.id).first(),
+    ).toBeNull();
+    expect(await env.MEDIA.head(firstMediaRow?.r2_key ?? "missing")).toBeNull();
   });
 });

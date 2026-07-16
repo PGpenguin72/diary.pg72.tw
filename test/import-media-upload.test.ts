@@ -13,6 +13,7 @@ import {
 import {
   UPLOAD_BOOKKEEPING_RETENTION_MS,
   cleanupExpiredMediaUploads,
+  cleanupQueuedMedia,
 } from "../worker/routes/import-media-uploads";
 
 const worker = exports.default;
@@ -688,6 +689,55 @@ describe("Apple Journal multipart media uploads", () => {
     expect(media?.status).toBe("ready");
     expect((await env.MEDIA.head(media?.r2_key ?? "missing"))?.size).toBe(PNG_BYTES.byteLength);
     expect((await worker.fetch(new Request(`http://localhost/api/entries/${completed.entryId}`))).status).toBe(200);
+  });
+
+  it("queued cleanup preserves media that still has another entry reference", async () => {
+    const createdResponse = await worker.fetch(
+      new Request("http://localhost/api/entries", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: "合成的共享媒體測試",
+          body: "這是隔離測試內容。",
+          occurredAt: "2026-07-17T00:00:00.000Z",
+          timezone: "Asia/Taipei",
+          localDate: "2026-07-17",
+          location: null,
+          mood: null,
+        }),
+      }),
+    );
+    const entry = await createdResponse.json<{ id: string }>();
+    const mediaId = crypto.randomUUID();
+    const r2Key = `imports/${mediaId}.png`;
+    const now = new Date().toISOString();
+    await env.MEDIA.put(r2Key, PNG_BYTES, { httpMetadata: { contentType: "image/png" } });
+    await env.DB.batch([
+      env.DB.prepare(`
+        INSERT INTO media (
+          id, r2_key, storage_kind, sha256, type, mime_type, size_bytes,
+          status, owner_subject, created_at, updated_at
+        ) VALUES (?1, ?2, 'private_r2', ?3, 'photo', 'image/png', ?4,
+          'ready', 'local-development', ?5, ?5)
+      `).bind(mediaId, r2Key, fingerprint(1_121), PNG_BYTES.byteLength, now),
+      env.DB.prepare(`
+        INSERT INTO entry_media (entry_id, media_id, position, placement, caption)
+        VALUES (?1, ?2, 0, 'cover', '')
+      `).bind(entry.id, mediaId),
+      env.DB.prepare(`
+        INSERT INTO media_cleanup_queue (media_id, r2_key, requested_at)
+        VALUES (?1, ?2, ?3)
+      `).bind(mediaId, r2Key, now),
+    ]);
+
+    expect(await cleanupQueuedMedia(env)).toMatchObject({ referenced: 1, deleted: 0, failed: 0 });
+    expect(await env.DB.prepare(`SELECT id FROM media WHERE id = ?1`).bind(mediaId).first()).not.toBeNull();
+    expect(await env.MEDIA.head(r2Key)).not.toBeNull();
+    expect(
+      await env.DB.prepare(`SELECT media_id FROM media_cleanup_queue WHERE media_id = ?1`)
+        .bind(mediaId)
+        .first(),
+    ).toBeNull();
   });
 
   it("repairs a legacy failed small-image row instead of misreporting it as a duplicate", async () => {

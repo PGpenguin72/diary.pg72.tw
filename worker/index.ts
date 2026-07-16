@@ -6,6 +6,7 @@ import { entryRoutes } from "./routes/entries";
 import { importRoutes } from "./routes/imports";
 import {
   cleanupExpiredMediaUploads,
+  cleanupQueuedMedia,
   importMediaUploadRoutes,
 } from "./routes/import-media-uploads";
 import { overviewRoutes } from "./routes/overview";
@@ -48,6 +49,10 @@ export default {
   scheduled: (controller, env, context) => {
     context.waitUntil(
       cleanupExpiredMediaUploads(env, new Date(controller.scheduledTime))
+        .then(async (uploadResult) => ({
+          uploadResult,
+          mediaResult: await cleanupQueuedMedia(env),
+        }))
         .then((result) => console.info(JSON.stringify({
           event: "media_upload_cleanup_completed",
           ...result,

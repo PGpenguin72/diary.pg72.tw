@@ -12,7 +12,7 @@ import type {
 import { buildExcerpt, countWords } from "../lib/entry-content";
 import { apiError, noStore } from "../lib/http";
 import type { AuthVariables } from "../lib/auth/middleware";
-import { reconcileImportedEntryStatement } from "../lib/import-status";
+import { reconcileImportedEntryStatements } from "../lib/import-status";
 import {
   mediaR2Key,
   parseMediaUpload,
@@ -267,7 +267,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
         status: "duplicate",
         now,
       }),
-      reconcileImportedEntryStatement(context.env.DB, entryId, generationId, now),
+      ...reconcileImportedEntryStatements(context.env.DB, entryId, generationId, now),
     ]);
   } else if (existing) {
     await context.env.DB.batch([
@@ -327,7 +327,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
         status: "completed",
         now,
       }),
-      reconcileImportedEntryStatement(context.env.DB, entryId, generationId, now),
+      ...reconcileImportedEntryStatements(context.env.DB, entryId, generationId, now),
     ]);
   } else {
     await context.env.DB.batch([
@@ -451,7 +451,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries/:entryId/media", asy
         status: "duplicate",
         now,
       }),
-      reconcileImportedEntryStatement(context.env.DB, entryId, input.generationId, now),
+      ...reconcileImportedEntryStatements(context.env.DB, entryId, input.generationId, now),
     ]);
 
     const response: ImportAppleJournalMediaResponse = {
@@ -504,7 +504,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries/:entryId/media", asy
         status: "completed",
         now,
       }),
-      reconcileImportedEntryStatement(context.env.DB, entryId, input.generationId, now),
+      ...reconcileImportedEntryStatements(context.env.DB, entryId, input.generationId, now),
     ]);
     const response: ImportAppleJournalMediaResponse = {
       id: existingMedia.id,
@@ -547,7 +547,7 @@ importRoutes.post("/imports/apple-journal/:importId/entries/:entryId/media", asy
         status: "completed",
         now,
       }),
-      reconcileImportedEntryStatement(context.env.DB, entryId, input.generationId, now),
+      ...reconcileImportedEntryStatements(context.env.DB, entryId, input.generationId, now),
     ],
     failureStatements: [
       importItemStatement(context.env.DB, {

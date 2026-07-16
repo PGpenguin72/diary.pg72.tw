@@ -8,7 +8,7 @@ import type {
 } from "../../shared/api";
 import type { AuthVariables } from "../lib/auth/middleware";
 import { apiError, noStore } from "../lib/http";
-import { reconcileImportedEntryStatement } from "../lib/import-status";
+import { reconcileImportedEntryStatements } from "../lib/import-status";
 import {
   MAX_MEDIA_BYTES,
   MAX_MULTIPART_PARTS,
@@ -25,6 +25,7 @@ export const PART_UPLOAD_LEASE_MS = 10 * 60 * 1_000;
 export const UPLOAD_STATE_LEASE_MS = 10 * 60 * 1_000;
 export const UPLOAD_BOOKKEEPING_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 const CLEANUP_BATCH_SIZE = 50;
+const MEDIA_CLEANUP_BATCH_SIZE = 50;
 // R2 returns an opaque ETag; keep the exact value for complete(), but reject
 // empty, control-character, or unreasonably large values before persistence.
 const ETAG_PATTERN = /^[\x21-\x7e]{1,256}$/;
@@ -263,7 +264,12 @@ async function finalizeUpload(
       requiredUploadStatus: "completed",
       now,
     }),
-    reconcileImportedEntryStatement(database, upload.entry_id, upload.entry_generation_id, now),
+    ...reconcileImportedEntryStatements(
+      database,
+      upload.entry_id,
+      upload.entry_generation_id,
+      now,
+    ),
   ]);
 
   const completed = await uploadRowQuery(database, upload.media_id);
@@ -373,7 +379,7 @@ importMediaUploadRoutes.post(
           status: "duplicate",
           now,
         }),
-        reconcileImportedEntryStatement(context.env.DB, entryId, input.generationId, now),
+        ...reconcileImportedEntryStatements(context.env.DB, entryId, input.generationId, now),
       ]);
       const response: StartAppleJournalMediaUploadResponse = {
         id: existing.id,
@@ -445,7 +451,7 @@ importMediaUploadRoutes.post(
             status: "duplicate",
             now,
           }),
-          reconcileImportedEntryStatement(context.env.DB, entryId, input.generationId, now),
+          ...reconcileImportedEntryStatements(context.env.DB, entryId, input.generationId, now),
         ]);
         const response: StartAppleJournalMediaUploadResponse = {
           id: existing.id,
@@ -733,6 +739,91 @@ export interface MediaUploadCleanupResult {
   failed: number;
 }
 
+export interface MediaCleanupResult {
+  scanned: number;
+  deleted: number;
+  referenced: number;
+  skipped: number;
+  failed: number;
+}
+
+export async function cleanupQueuedMedia(env: Env): Promise<MediaCleanupResult> {
+  const candidates = await env.DB.prepare(`
+    SELECT media_id, r2_key
+    FROM media_cleanup_queue
+    ORDER BY requested_at, media_id
+    LIMIT ?1
+  `).bind(MEDIA_CLEANUP_BATCH_SIZE).all<{ media_id: string; r2_key: string }>();
+  const result: MediaCleanupResult = {
+    scanned: candidates.results.length,
+    deleted: 0,
+    referenced: 0,
+    skipped: 0,
+    failed: 0,
+  };
+
+  for (const candidate of candidates.results) {
+    try {
+      const removed = await env.DB.prepare(`
+        DELETE FROM media
+        WHERE id = ?1 AND r2_key = ?2 AND storage_kind = 'private_r2' AND status = 'ready'
+          AND NOT EXISTS (
+            SELECT 1 FROM entry_media WHERE media_id = media.id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM media_uploads
+            WHERE media_id = media.id
+              AND status NOT IN ('completed', 'failed', 'aborted')
+          )
+      `).bind(candidate.media_id, candidate.r2_key).run();
+
+      if (removed.meta.changes !== 1) {
+        const current = await env.DB.prepare(`
+          SELECT
+            media.id,
+            EXISTS (SELECT 1 FROM entry_media WHERE media_id = media.id) AS referenced
+          FROM media WHERE media.id = ?1
+        `).bind(candidate.media_id).first<{ id: string; referenced: number }>();
+        if (current?.referenced) {
+          await env.DB.prepare(`DELETE FROM media_cleanup_queue WHERE media_id = ?1`)
+            .bind(candidate.media_id)
+            .run();
+          result.referenced += 1;
+          continue;
+        }
+        if (current) {
+          result.skipped += 1;
+          continue;
+        }
+      }
+
+      try {
+        await env.MEDIA.delete(candidate.r2_key);
+      } catch {
+        await env.DB.prepare(`
+          UPDATE media_cleanup_queue SET
+            attempts = attempts + 1, last_error_at = ?2
+          WHERE media_id = ?1
+        `).bind(candidate.media_id, new Date().toISOString()).run();
+        result.failed += 1;
+        continue;
+      }
+      await env.DB.prepare(`DELETE FROM media_cleanup_queue WHERE media_id = ?1`)
+        .bind(candidate.media_id)
+        .run();
+      result.deleted += 1;
+    } catch {
+      result.failed += 1;
+      console.error(JSON.stringify({
+        event: "media_cleanup_failed",
+        mediaId: candidate.media_id,
+      }));
+    }
+  }
+
+  return result;
+}
+
 export async function cleanupExpiredMediaUploads(
   env: Env,
   now = new Date(),
@@ -885,7 +976,7 @@ export async function cleanupExpiredMediaUploads(
           requiredUploadStatus: "aborted",
           now: nowIso,
         }),
-        reconcileImportedEntryStatement(
+        ...reconcileImportedEntryStatements(
           env.DB,
           upload.entry_id,
           upload.entry_generation_id,
@@ -1397,7 +1488,7 @@ importMediaUploadRoutes.post(
         requiredUploadStatus: "aborted",
         now,
       }),
-      reconcileImportedEntryStatement(
+      ...reconcileImportedEntryStatements(
         context.env.DB,
         entryId,
         upload.entry_generation_id,
