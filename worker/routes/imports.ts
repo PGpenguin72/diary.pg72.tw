@@ -155,6 +155,26 @@ function importedMediaLinkStatement(
   );
 }
 
+function importGenerationStatement(
+  database: D1Database,
+  input: {
+    entryId: string;
+    generationId: string;
+    expectedMediaCount: number;
+    now: string;
+  },
+): D1PreparedStatement {
+  return database.prepare(`
+    INSERT INTO entry_import_generations (
+      entry_id, generation_id, expected_media_count, created_at, updated_at
+    ) VALUES (?1, ?2, ?3, ?4, ?4)
+    ON CONFLICT(entry_id) DO UPDATE SET
+      generation_id = excluded.generation_id,
+      expected_media_count = excluded.expected_media_count,
+      updated_at = excluded.updated_at
+  `).bind(input.entryId, input.generationId, input.expectedMediaCount, input.now);
+}
+
 async function readJson(context: { req: { json(): Promise<unknown> } }): Promise<unknown> {
   try {
     return await context.req.json();
@@ -252,11 +272,16 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
     await context.env.DB.batch([
       context.env.DB.prepare(`
         UPDATE entries SET
-          expected_media_count = ?2, import_generation_id = ?3,
-          status = CASE WHEN ?2 = 0 THEN 'published' ELSE 'partial-import' END,
-          deleted_at = NULL, updated_at = ?4
+          import_generation_id = ?2, status = 'partial-import',
+          deleted_at = NULL, updated_at = ?3
         WHERE id = ?1
-      `).bind(entryId, input.mediaCount, generationId, now),
+      `).bind(entryId, generationId, now),
+      importGenerationStatement(context.env.DB, {
+        entryId,
+        generationId,
+        expectedMediaCount: input.mediaCount,
+        now,
+      }),
       importItemStatement(context.env.DB, {
         id: crypto.randomUUID(),
         importId,
@@ -284,10 +309,9 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
           mood = ?10,
           layout_seed = ?11,
           word_count = ?12,
-          expected_media_count = ?13,
-          import_generation_id = ?14,
+          import_generation_id = ?13,
           status = 'partial-import',
-          updated_at = ?15,
+          updated_at = ?14,
           deleted_at = NULL
         WHERE id = ?1
       `).bind(
@@ -303,10 +327,15 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
         input.mood,
         wordCount % 97,
         wordCount,
-        input.mediaCount,
         generationId,
         now,
       ),
+      importGenerationStatement(context.env.DB, {
+        entryId,
+        generationId,
+        expectedMediaCount: input.mediaCount,
+        now,
+      }),
       context.env.DB.prepare(`DELETE FROM entry_blocks WHERE entry_id = ?1`).bind(entryId),
       context.env.DB.prepare(`
         INSERT INTO entry_blocks (
@@ -335,12 +364,11 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
         INSERT INTO entries (
           id, journal_id, source, source_id, source_hash, title, excerpt,
           occurred_at, timezone, local_date, location_name, mood, layout_seed,
-          word_count, expected_media_count, import_generation_id, status, created_at, updated_at
+          word_count, import_generation_id, status, created_at, updated_at
         ) VALUES (
           ?1, 'journal-everyday', 'apple_journal', ?2, ?3, ?4, ?5,
-          ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
-          CASE WHEN ?13 = 0 THEN 'published' ELSE 'partial-import' END,
-          ?15, ?15
+          ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'partial-import',
+          ?14, ?14
         )
       `).bind(
         entryId,
@@ -355,10 +383,15 @@ importRoutes.post("/imports/apple-journal/:importId/entries", async (context) =>
         input.mood,
         wordCount % 97,
         wordCount,
-        input.mediaCount,
         generationId,
         now,
       ),
+      importGenerationStatement(context.env.DB, {
+        entryId,
+        generationId,
+        expectedMediaCount: input.mediaCount,
+        now,
+      }),
       context.env.DB.prepare(`
         INSERT INTO entry_blocks (
           id, entry_id, position, type, text_content, attrs_json, created_at, updated_at

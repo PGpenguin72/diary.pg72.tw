@@ -20,7 +20,15 @@ export function reconcileImportedEntryStatements(
             WHERE entry_media.entry_id = entries.id
               AND entry_media.import_generation_id = ?2
               AND media.status = 'ready'
-          ) >= expected_media_count
+          ) >= (
+            SELECT expected_media_count
+            FROM entry_import_generations
+            WHERE entry_id = entries.id AND generation_id = ?2
+          )
+          AND EXISTS (
+            SELECT 1 FROM entry_import_generations
+            WHERE entry_id = entries.id AND generation_id = ?2
+          )
           THEN 'published'
           ELSE 'partial-import'
         END,

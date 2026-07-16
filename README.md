@@ -211,9 +211,10 @@ flowchart TD
 - 已實作：每段最多重試三次；D1 保存 opaque R2 ETag 與已完成 part，重新選擇同一 ZIP 可從中斷處繼續。完成、取消與過期 session 都有明確狀態，failed media row 不再被誤判成成功 duplicate。
 - 已實作：part、complete 與 abort 以 D1 version/next-part compare-and-set 互斥；part reservation 有短 lease，Worker 在 R2 寫入前後中止時可由同一 part 安全接管並重寫。R2 已完成但 D1 尚未 finalize 時，以 private object head 重試 reconciliation。
 - 已實作：multipart object key 與 upload ID 只由 Worker 產生及保存，綁定 import、entry 與 PG72 ID `sub`；瀏覽器不能指定任意 R2 key。第一段會再次做 magic-signature / MIME 驗證。
-- 已實作：匯入畫面同時顯示整體 item 進度與目前媒體的 byte / part 進度，提供 ARIA progressbar/live status；部分失敗會逐項列出並可下載 JSON report。
-- 已實作：每日 `03:17 UTC` 的 scheduled handler 分批處理最多 50 個過期 session；active lease 不會被搶走，R2 已完成但 D1 未 finalize 的工作會先 reconciliation，其餘才 abort。`completed` / `failed` / `aborted` bookkeeping 保留 7 天後刪除，不刪 ready media、entry link 或 R2 object。
-- 已實作：單次預覽最多 10,000 篇 entry，HTML 與保留文字各限制 32 MiB；path traversal、絕對路徑、異常壓縮、衝突路徑及損壞 ZIP 都會在匯入前停止並顯示安全錯誤。
+- 已實作：匯入畫面同時顯示整體 item 進度與目前媒體的 byte / part 進度，提供 ARIA progressbar/live status；entry 建立失敗時，每個未嘗試附件都會以 source path / fingerprint 明確列為 skipped，完整 bounded 清單可下載 JSON report，不以任意筆數截斷。
+- 已實作：每次 entry 匯入都取得新的 generation ID；只有在該 generation 明確重用或完成的 ready 附件能滿足 expected count。舊 generation 保留到新 generation 全部 ready，然後在同一 D1 batch publish、排入 cleanup queue 並移除 stale link。
+- 已實作：每日 `03:17 UTC` 的 scheduled handler 分批處理最多 50 個過期 session；active lease 不會被搶走，R2 已完成但 D1 未 finalize 的工作會先 reconciliation，其餘才 abort。`completed` / `failed` / `aborted` bookkeeping 保留 7 天；superseded media 只有在 D1 已無任何 entry 引用時，才由 durable queue 先移除 D1 row、再冪等刪除 R2 object。
+- 已實作：單次預覽最多 10,000 篇 entry、50,000 個 reconciliation items，HTML 與保留文字各限制 32 MiB；每個 ZIP path 最多 1,024 bytes、中央目錄 path metadata 合計最多 8 MiB。path traversal、絕對路徑、異常壓縮、衝突路徑及損壞 ZIP 都會在匯入前停止並顯示安全錯誤；central-directory fingerprint 只使用已通過這些上限的 path。
 - 待實作：若未來需要減少 Worker 流量，可改用 object-scoped presigned upload；目前不需要 R2 API credential 或跨網域 CORS。
 - 已實作：原始 ZIP 不會送進 Worker 或永久保存，避免同一份媒體占兩倍空間。
 - 待實作：可選的加密原始匯入備份。
@@ -301,6 +302,8 @@ R2 提供 TLS 傳輸加密與 Cloudflare 管理的 AES-256 at-rest encryption，
 2. Workers Builds 安裝依賴、執行 check/test/build。
 3. branch/PR 建 preview；main 通過後 deploy production。
 4. production migration 必須是獨立、可觀察且可回復的步驟，不可讓 preview 誤用 production D1/R2。
+
+目前 media import schema 的 canonical 路徑是 `0003`–`0006`。`0003` 保持已可能被環境記錄的原始內容；`0004`、`0005` 加入 generation / cleanup queue，`0006` 以 forward migration 建立 generation expectation state 並重建 CAS upload table。`0006` 會在仍有 active upload 或 `partial-import` entry 時直接失敗，部署前必須依 `handoff.md` 的 preflight / drain / rollback runbook 處理；不得改寫 D1 migration history 或只回滾 Worker code。
 
 ### 日記上傳
 
