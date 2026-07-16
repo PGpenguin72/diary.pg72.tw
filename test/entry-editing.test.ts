@@ -2,7 +2,7 @@ import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 
 const worker = exports.default;
-const PNG_BYTES = new Uint8Array([137, 80, 78, 71]);
+const PNG_BYTES = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
 
 interface EntryDetailPayload {
   id: string;

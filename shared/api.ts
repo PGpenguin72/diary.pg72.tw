@@ -150,6 +150,34 @@ export interface ImportAppleJournalMediaResponse {
   disposition: "inserted" | "duplicate";
 }
 
+export interface StartAppleJournalMediaUploadInput {
+  fingerprint: string;
+  sourcePath: string;
+  type: MediaType;
+  mimeType: string;
+  sizeBytes: number;
+  position: number;
+  placement: "inline" | "grid" | "cover";
+  caption: string;
+}
+
+export type StartAppleJournalMediaUploadResponse =
+  | {
+      id: string;
+      disposition: "duplicate";
+    }
+  | {
+      id: string;
+      disposition: "uploading";
+      partSize: number;
+      partCount: number;
+      uploadedParts: number[];
+    };
+
+export interface UploadAppleJournalMediaPartResponse {
+  partNumber: number;
+}
+
 export interface CompleteAppleJournalImportInput {
   insertedCount: number;
   duplicateCount: number;

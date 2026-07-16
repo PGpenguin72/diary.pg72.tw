@@ -25,6 +25,7 @@ interface ImportSummary {
   imported: number;
   duplicates: number;
   failed: number;
+  lastError: string | null;
 }
 
 type ImportState =
@@ -56,6 +57,7 @@ export function ImportDialog({
   onImported: () => Promise<void>;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const importAbortRef = useRef<AbortController | null>(null);
   const [state, setState] = useState<ImportState>({ status: "idle" });
   const isImporting = state.status === "importing";
 
@@ -87,7 +89,9 @@ export function ImportDialog({
     const mediaOperations = preview.entries.reduce((total, entry) => total + entry.media.length, 0);
     const total = preview.entries.length + mediaOperations;
     let completed = 0;
-    const summary: ImportSummary = { imported: 0, duplicates: 0, failed: 0 };
+    const summary: ImportSummary = { imported: 0, duplicates: 0, failed: 0, lastError: null };
+    const controller = new AbortController();
+    importAbortRef.current = controller;
 
     setState({
       status: "importing",
@@ -105,11 +109,12 @@ export function ImportDialog({
         fileFingerprint: preview.fileFingerprint,
         entryCount: preview.entries.length,
         mediaCount: preview.mediaCount,
-      });
+      }, controller.signal);
       const mediaReader = mediaOperations > 0 ? await createAppleJournalMediaReader(file) : null;
 
       try {
         for (const entry of preview.entries) {
+          controller.signal.throwIfAborted();
           setState({
             status: "importing",
             file,
@@ -131,17 +136,20 @@ export function ImportDialog({
               localDate: entry.localDate,
               location: entry.location,
               mood: entry.mood,
-            });
+            }, controller.signal);
             if (importedEntry.disposition === "duplicate") summary.duplicates += 1;
             else summary.imported += 1;
-          } catch {
+          } catch (error) {
+            if (controller.signal.aborted) throw error;
             summary.failed += 1;
+            summary.lastError = errorMessage(error);
             completed += 1 + entry.media.length;
             continue;
           }
 
           completed += 1;
           for (const [position, media] of entry.media.entries()) {
+            controller.signal.throwIfAborted();
             setState({
               status: "importing",
               file,
@@ -154,18 +162,25 @@ export function ImportDialog({
 
             try {
               if (!mediaReader) throw new Error("媒體讀取器尚未建立。");
-              const blob = await mediaReader.read(media);
-              await importAppleJournalMedia(importJob.id, importedEntry.id, {
-                blob,
+              const opened = await mediaReader.open(media, controller.signal);
+              const importedMedia = await importAppleJournalMedia(importJob.id, importedEntry.id, {
+                stream: opened.stream,
+                mimeType: opened.mimeType,
+                sizeBytes: opened.sizeBytes,
                 fingerprint: media.fingerprint,
                 sourcePath: media.archivePath,
                 type: media.type,
                 position,
                 placement: position === 0 ? "cover" : "grid",
                 caption: media.caption,
-              });
-            } catch {
+              }, controller.signal);
+              if (importedMedia.disposition !== "duplicate") {
+                await opened.finished;
+              }
+            } catch (error) {
+              if (controller.signal.aborted) throw error;
               summary.failed += 1;
+              summary.lastError = errorMessage(error);
             }
             completed += 1;
           }
@@ -179,11 +194,17 @@ export function ImportDialog({
         duplicateCount: summary.duplicates,
         skippedCount: 0,
         failedCount: summary.failed,
-      });
+      }, controller.signal);
       await onImported();
       setState({ status: "complete", file, preview, summary });
     } catch (error) {
-      setState({ status: "error", file, preview, message: errorMessage(error) });
+      if (controller.signal.aborted) {
+        setState({ status: "ready", file, preview });
+      } else {
+        setState({ status: "error", file, preview, message: errorMessage(error) });
+      }
+    } finally {
+      if (importAbortRef.current === controller) importAbortRef.current = null;
     }
   }
 
@@ -281,21 +302,47 @@ export function ImportDialog({
                 <span style={{ width: `${state.total ? (state.completed / state.total) * 100 : 0}%` }} />
               </div>
               <small>{state.completed} / {state.total}</small>
+              <button
+                className="button button--secondary"
+                type="button"
+                onClick={() => importAbortRef.current?.abort()}
+              >
+                取消匯入
+              </button>
             </>
           ) : null}
 
           {state.status === "complete" ? (
             <>
-              <CheckCircle2 aria-hidden="true" size={32} />
-              <strong>匯入完成</strong>
+              {state.summary.failed ? (
+                <FileWarning aria-hidden="true" size={32} />
+              ) : (
+                <CheckCircle2 aria-hidden="true" size={32} />
+              )}
+              <strong>{state.summary.failed ? "部分附件尚未完成" : "匯入完成"}</strong>
               <span>
                 {state.summary.imported} 篇已寫入 · {state.summary.duplicates} 篇重複
                 {state.summary.failed ? ` · ${state.summary.failed} 個失敗` : ""}
               </span>
-              <small>總覽與統計已更新</small>
-              <button className="button button--primary" type="button" onClick={onClose}>
-                完成
-              </button>
+              <small>
+                {state.summary.failed
+                  ? state.summary.lastError ?? "重新選擇同一份 ZIP 即可從未完成處繼續。"
+                  : "總覽與統計已更新"}
+              </small>
+              <div className="import-actions">
+                {state.summary.failed ? (
+                  <button
+                    className="button button--secondary"
+                    type="button"
+                    onClick={() => void runImport(state.file, state.preview)}
+                  >
+                    重試未完成項目
+                  </button>
+                ) : null}
+                <button className="button button--primary" type="button" onClick={onClose}>
+                  完成
+                </button>
+              </div>
             </>
           ) : null}
 

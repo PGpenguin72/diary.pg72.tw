@@ -4,6 +4,7 @@ import { apiError, noStore } from "./lib/http";
 import { authRoutes } from "./routes/auth";
 import { entryRoutes } from "./routes/entries";
 import { importRoutes } from "./routes/imports";
+import { importMediaUploadRoutes } from "./routes/import-media-uploads";
 import { overviewRoutes } from "./routes/overview";
 
 const app = new Hono<{ Bindings: Env; Variables: AuthVariables }>();
@@ -23,6 +24,7 @@ app.route("/api", authRoutes);
 app.route("/api", overviewRoutes);
 app.route("/api", entryRoutes);
 app.route("/api", importRoutes);
+app.route("/api", importMediaUploadRoutes);
 
 app.notFound((context) => apiError(context, 404, "NOT_FOUND", "找不到這個 API endpoint。"));
 

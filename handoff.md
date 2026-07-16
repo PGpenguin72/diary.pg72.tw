@@ -82,17 +82,20 @@
 - 支援目前已知的 `Entries/*.html` + `Resources/` 匯出結構。
 - 忽略 `__MACOSX`、AppleDouble 與 Finder metadata。
 - 媒體會做 magic-signature sniffing，不直接相信副檔名或 declared MIME。
-- entry 逐篇 D1 upsert，媒體逐個送到 Worker 後寫入 private R2。
+- entry 逐篇 D1 upsert；zip.js 以 backpressure 串流解壓、瀏覽器只保留目前的 8 MiB part，再由 Worker 的 owner-bound R2 multipart session 寫入 private R2。
 - 依 archive fingerprint、source path、canonical content hash 與媒體 fingerprint 去重；同一 ZIP 可重新選取並安全重跑。
-- import job 與 import item 會記錄進度，已完成基本 inserted / duplicate / skipped / failed 計數。
+- D1 `media_uploads` / `media_upload_parts` 保存 upload session、part 順序與 opaque ETag；每段重試三次，中斷後可續傳，取消會 abort，failed row 可恢復而不再假裝成 duplicate。
+- import job 與 import item 會記錄進度；部分失敗 UI 會保留錯誤並允許重跑同一 ZIP。
 
 主要檔案：
 
 - `src/components/ImportDialog.tsx`
 - `src/lib/apple-journal.ts`
 - `worker/routes/imports.ts`
+- `worker/routes/import-media-uploads.ts`
 - `shared/schemas.ts`
 - `migrations/0001_initial.sql`
+- `migrations/0003_media_uploads.sql`
 
 ## 登入與授權（PG72 ID OIDC）
 
@@ -121,9 +124,13 @@
 | POST | `/api/imports/apple-journal` | 建立或重用 import job |
 | POST | `/api/imports/apple-journal/:importId/entries` | 寫入單篇 normalized entry |
 | POST | `/api/imports/apple-journal/:importId/entries/:entryId/media` | 寫入單一附件 |
+| POST | `/api/imports/apple-journal/:importId/entries/:entryId/media/uploads` | 建立或續接 owner-bound multipart upload |
+| PUT | `/api/imports/apple-journal/:importId/entries/:entryId/media/uploads/:mediaId/parts/:partNumber` | 依序寫入一個 8 MiB R2 part |
+| POST | `/api/imports/apple-journal/:importId/entries/:entryId/media/uploads/:mediaId/complete` | 驗證 part / ETag 並完成 R2 object |
+| POST | `/api/imports/apple-journal/:importId/entries/:entryId/media/uploads/:mediaId/abort` | 取消未完成 upload |
 | POST | `/api/imports/apple-journal/:importId/complete` | 完成與核對 import job |
 
-資料模型以 `migrations/0001_initial.sql` 為準，核心 tables 是 `journals`、`entries`、`entry_blocks`、`media`、`entry_media`、`tags`、`entry_tags`、`imports`、`import_items` 與 FTS5 `entry_search`。共用 API types 在 `shared/api.ts`，request parsing / validation 在 `shared/schemas.ts`。
+資料模型以 migrations 為準，核心 tables 是 `journals`、`entries`、`entry_blocks`、`media`、`entry_media`、`media_uploads`、`media_upload_parts`、`tags`、`entry_tags`、`imports`、`import_items` 與 FTS5 `entry_search`。共用 API types 在 `shared/api.ts`，request parsing / validation 在 `shared/schemas.ts`。
 
 ## Cloudflare 實況與部署缺口
 
@@ -158,22 +165,22 @@ Cloudflare CLI 指令執行前先讀 Cloudflare / Wrangler skill 或目前官方
 以下是後續工作的主要缺口，不要把 README 的規劃誤認為已實作：
 
 1. **Production environment isolation 與部署**：登入程式碼（PG72 ID OIDC）已完成，但 preview/production D1/R2、Worker deploy、custom domain、production secret 設定都未完成；back-channel logout 遞送要等 SSO 端實作。
-2. **大型媒體 upload**：目前附件仍經 Worker request body 寫 R2；真實 archive 有約 157.4 MB 單檔，會超過常見 100 MB request body 限制。需要 object-scoped direct upload authorization 與 R2 multipart/resume。
-3. **匯入 reconciliation**：已有基本進度與去重，但完整可下載 error report、部分完成狀態、逐 part retry、checksum reconciliation 和中斷後精確續傳仍需補強。
+2. **大型媒體 upload 的 production gate**：本機已改為 8 MiB Worker request + private R2 multipart，含順序/大小/MIME/簽章/ETag 驗證、逐 part retry、續傳、取消與 failed-row 修復；仍需先套用 `0003_media_uploads.sql`，再用合成大檔做 production smoke。D1 upload bookkeeping 的定期清理由後續排程處理；presigned direct upload 只是可選流量優化。
+3. **匯入 reconciliation**：已有基本進度、去重、逐 part 續傳與部分失敗重試 UI，但完整可下載 error report與 end-to-end content checksum reconciliation 仍需補強。
 4. **Apple schema / codec 相容性**：Apple 未承諾 HTML schema 穩定；HEIC/HEVC/HDR 的跨瀏覽器顯示、縮圖和必要轉碼尚未完整解決。
 5. **編輯工作流**：已完成 markdown 編輯（`PATCH /api/entries/:id`，imported entry 的多個文字 block 會合併為單一 paragraph）、soft delete + 復原（`DELETE` / `POST .../restore`）、附件上傳與移除（`POST /api/entries/:id/media`、`DELETE .../media/:mediaId`，fingerprint 去重、共用媒體引用計數保護、R2 key prefix `uploads/`）。尚缺：rich block editor、draft/autosave、位置/標籤管理、軟刪除保留期後的最終 R2 清理。
 6. **資料可攜與復原**：完整 export、backup/checkpoint、restore 與 final R2 cleanup 尚未完成。
 7. **規模與查詢**：需要 10,000 entries fixture、query-plan 檢查、完整 pagination / load-more 與更完整的 calendar/places/insights 行為。
-8. **測試覆蓋**：尚缺 production 實地登入邊界驗證、direct/multipart upload、malformed archive、delete recovery、完整 export 與 production smoke tests。
+8. **測試覆蓋**：已有合成 PNG/QuickTime browser-to-R2、multipart resume/order/size/MIME/ETag/abort、remote PGID owner/Origin boundary；尚缺 production 實地大檔、malformed archive、delete recovery、完整 export 與 production smoke tests。
 
 ## 建議接手順序
 
 除非使用者指定另一個 UI 任務，優先順序建議如下：
 
 1. 先完成 production/preview environment 建置與部署（含 `AUTH_CLIENT_SECRET`、`AUTH_ALLOWED_SUBJECT` 與登入邊界實測），讓線上版本有可信的私密邊界。
-2. 實作 private R2 direct + multipart upload；用大於 100 MB 的合成媒體測試 retry、resume、size/MIME 限制與 cleanup。
-3. 補 Apple importer reconciliation / error report，並將已知真實 export 變體縮成無隱私的最小合成 fixture。
-4. 再做 entry edit、draft/autosave、附件管理、刪除復原與完整 export。
+2. 審核並部署 multipart 變更：先套用 migration `0003`，再用合成媒體測 retry/resume/abort 與大於 100 MB 單檔；不要先用真實日記試錯。
+3. 補 upload bookkeeping 的定期 cleanup、Apple importer reconciliation / error report，並將已知真實 export 變體縮成無隱私的最小合成 fixture。
+4. 再做 draft/autosave、位置/標籤管理、刪除復原與完整 export。
 
 如果工作只涉及既有 UI，仍要守住本文件中的卡片無媒體、詳情底部媒體、有序 masonry 與私密資料界線。
 

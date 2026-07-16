@@ -13,7 +13,7 @@
 - Overview API、timeline API、entry detail API 與 private R2 streaming route
 - Overview、動態時間軸、日曆、Places、Insights、搜尋與 entry 閱讀視窗
 - 文字日記的新增、編輯、刪除（soft delete 可復原）與附件上傳/移除管理
-- Apple Journal HTML ZIP 解析、內容預覽、逐篇 D1 upsert、媒體 R2 上傳與重複匯入去重
+- Apple Journal HTML ZIP 解析、內容預覽、逐篇 D1 upsert、可續傳 R2 multipart 媒體上傳與重複匯入去重
 - 空白 seed；合成 Apple Journal fixture 只存在隔離的 E2E state
 - Workers runtime tests、type-aware ESLint、production build 與 Playwright desktop/mobile workflows
 
@@ -85,9 +85,9 @@ flowchart TB
         USER --> DEPLOY
         DEPLOY --> API
         API -->|metadata / text| D1
-        API -->|短效 upload URL| USER
-        USER -->|媒體直接上傳，不經 Worker body| R2
-        API -->|授權讀取 / 短效 download URL| R2
+        USER -->|8 MiB 授權分段| API
+        API -->|R2 multipart binding| R2
+        API -->|授權串流讀取| R2
     end
 ```
 
@@ -188,7 +188,7 @@ flowchart TD
     JOB[建立 import job 並取得 upload 授權]
     PARSE[逐項串流解析，不把整包解壓進記憶體]
     NORMALIZE[轉成內部 Entry / Block / Media model]
-    MEDIA[照片、影片、錄音直接上傳 Private R2]
+    MEDIA[照片、影片、錄音分段寫入 Private R2]
     ENTRY[分批寫入 D1]
     VERIFY[核對 entry、attachment、checksum 與失敗項目]
     STATS[重建搜尋索引與統計]
@@ -206,10 +206,12 @@ flowchart TD
 
 - 已實作：ZIP 由瀏覽器使用 zip.js random access 逐項讀取，不將整包送進 Worker 或一次解壓到記憶體。
 - 已實作：忽略 `__MACOSX`、AppleDouble 與 Finder metadata；媒體依 magic signature 正規化 MIME，不信任錯標副檔名。
-- 已實作：每篇 entry 獨立 upsert；媒體逐個解壓並以 request body 串流至 Worker，再寫入 private R2。
+- 已實作：每篇 entry 獨立 upsert；zip.js 以 `WritableStream` + backpressure 串流解壓媒體，瀏覽器只組成目前的 8 MiB part，不先建立整個大型媒體 Blob。Worker 再以 owner-bound R2 multipart session 寫入 private R2。非最後一段符合 R2 的 5 MiB 下限，單次 request 明確低於 Cloudflare 100 MB 的最低方案上限。
 - 已實作：import job 記錄進度；重新選擇同一個 ZIP 會依 central-directory fingerprint、source path 與 canonical content hash 去重。
-- 待實作：大型媒體使用短效 upload authorization 直接上傳 R2，避開 Worker request body 限制。
-- 待實作：大型單檔使用 R2 multipart upload，讓每個 part 可以獨立重試。
+- 已實作：每段最多重試三次；D1 保存 opaque R2 ETag 與已完成 part，重新選擇同一 ZIP 可從中斷處繼續。完成、取消與過期 session 都有明確狀態，failed media row 不再被誤判成成功 duplicate。
+- 已實作：multipart object key 與 upload ID 只由 Worker 產生及保存，綁定 import、entry 與 PG72 ID `sub`；瀏覽器不能指定任意 R2 key。第一段會再次做 magic-signature / MIME 驗證。
+- 待實作：若未來需要減少 Worker 流量，可改用 object-scoped presigned upload；目前不需要 R2 API credential 或跨網域 CORS。
+- 待實作：排程清除 D1 中已 completed / aborted / 過期的 upload bookkeeping。R2 未完成 multipart 預設會自動於 7 天後 abort；重試同一媒體時也會 opportunistic abort 舊 session。
 - 已實作：原始 ZIP 不會送進 Worker 或永久保存，避免同一份媒體占兩倍空間。
 - 待實作：可選的加密原始匯入備份。
 - 每一篇 entry 獨立 commit。某個附件失敗不能讓已完成的數百篇全部 rollback。
@@ -218,7 +220,7 @@ flowchart TD
 
 - 目前 HTML export 沒有可用的穩定 entry ID，因此使用 source path 搭配 canonical entry fields 的 SHA-256 作為 `source_hash`。
 - `(source, source_id)` 或 `(source, source_hash)` 建 unique constraint，重跑匯入不產生重複日記。
-- 媒體目前使用 archive fingerprint、resource path、size 與 ZIP CRC32 組合後的 SHA-256 fingerprint 去重；完整 content-addressed streaming hash 會和 direct/multipart upload 一起補上。
+- 媒體目前使用 archive fingerprint、resource path、size 與 ZIP CRC32 組合後的 SHA-256 fingerprint 去重；完整 content-addressed streaming hash 仍待補上。
 - ZIP parser 必須防止 path traversal、zip bomb、異常壓縮比、偽造 MIME、過量檔案數與不支援的格式。
 - 匯入完成報告必須列出 entry 與附件數量，任何無法解析的資料都要可下載 error report，不能安靜忽略。
 
@@ -231,6 +233,7 @@ flowchart TD
 | `entry_blocks` | 有順序的文字與 attachment blocks；避免將整篇大型內容塞進單一 row |
 | `media` | R2 key、hash、MIME、大小、尺寸、長度、處理狀態 |
 | `entry_media` | entry 與 media 的關係、順序、inline/grid、caption、crop |
+| `media_uploads` / `media_upload_parts` | owner-bound R2 multipart session、part 大小/順序/opaque ETag、完成與取消狀態 |
 | `locations` | 名稱、座標與可選的模糊化資料 |
 | `tags` / `entry_tags` | 標籤與關聯 |
 | `imports` / `import_items` | 匯入來源、fingerprint、進度、錯誤與續傳狀態 |
@@ -277,7 +280,7 @@ R2 提供 TLS 傳輸加密與 Cloudflare 管理的 AES-256 at-rest encryption，
 - React + Vite + Cloudflare Vite plugin
 - Cloudflare Worker API（可用 Hono 做路由）
 - D1 migrations，以 SQL schema 為真實來源
-- R2 private binding + S3 presigned/multipart upload
+- R2 private binding + Workers multipart upload（presigned upload 保留為後續流量優化）
 - TipTap 或同級 schema-based rich text editor
 - zip.js 或同級支援 Blob/streaming 的 ZIP parser
 - Zod 做 API 與 import boundary validation
@@ -298,7 +301,7 @@ R2 提供 TLS 傳輸加密與 Cloudflare 管理的 AES-256 at-rest encryption，
 ### 日記上傳
 
 1. 使用者登入線上 app。
-2. 建立/編輯 entry，附件直接上傳 R2。
+2. 建立/編輯 entry，匯入附件以 owner-bound multipart session 分段寫入 private R2。
 3. Worker 將 entry 與媒體關聯寫入 D1。
 4. 成功後立即出現在 timeline 與 overview；**沒有 Git commit，也沒有 deployment**。
 
@@ -310,14 +313,14 @@ R2 提供 TLS 傳輸加密與 Cloudflare 管理的 AES-256 at-rest encryption，
 
 - 擴充合成 Apple Journal export fixtures 並記錄 schema 變異
 - 確認是否要在 MVP 實作 client-side end-to-end encryption
-- 做 Apple ZIP streaming、R2 multipart 與 HEVC/HDR 播放 spike
+- 做 Apple ZIP streaming 與 HEVC/HDR 播放 spike；R2 multipart 已完成本機實作與合成回歸
 - 定義 design tokens、版型規則與 entry block schema
 
 ### Phase 1：可安全使用的 MVP
 
 - Workers/React scaffold、local/preview/production environments
 - PG72 ID OIDC 登入（owner `sub` allowlist）、D1、private R2
-- Apple Journal HTML 一鍵匯入已具備本機可重跑基礎；待補大型媒體 multipart 與完整 reconciliation report
+- Apple Journal HTML 一鍵匯入已具備本機可重跑、multipart 續傳與 failed-row 修復；待補完整 reconciliation report 與 production 大檔 smoke
 - timeline、entry viewer、media viewer、calendar、search
 - rich block editor、draft/autosave、日期、位置與標籤
 - 照片、影片、錄音的線上直接上傳

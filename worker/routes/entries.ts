@@ -15,6 +15,7 @@ import type {
   UploadEntryMediaResponse,
 } from "../../shared/api";
 import { createEntrySchema, updateEntrySchema } from "../../shared/schemas";
+import type { AuthVariables } from "../lib/auth/middleware";
 import { buildExcerpt, countWords } from "../lib/entry-content";
 import { apiError, noStore } from "../lib/http";
 import {
@@ -23,6 +24,7 @@ import {
   mediaR2Key,
   parseMediaUpload,
   uploadMediaObject,
+  validatedMediaBody,
 } from "../lib/media";
 
 const timelineQuerySchema = z.object({
@@ -69,7 +71,14 @@ interface BlockRow {
   attrs_json: string;
 }
 
-export const entryRoutes = new Hono<{ Bindings: Env }>();
+export const entryRoutes = new Hono<{ Bindings: Env; Variables: AuthVariables }>();
+
+function uploadOwnerSubject(context: { get(key: "auth"): AuthVariables["auth"] }): string | null {
+  const auth = context.get("auth");
+  if (auth.mode === "session") return auth.subject;
+  if (auth.mode === "local") return "local-development";
+  return null;
+}
 
 function buildEntries(
   rows: EntryRow[],
@@ -502,6 +511,8 @@ entryRoutes.post("/entries/:entryId/media", async (context) => {
   }
 
   const input = query.data;
+  const ownerSubject = uploadOwnerSubject(context);
+  if (!ownerSubject) return apiError(context, 403, "UPLOAD_NOT_ALLOWED", "沒有權限上傳這個媒體。" );
   const now = new Date().toISOString();
   // Appends after the entry's current media; INSERT OR IGNORE keeps re-linking
   // the same media idempotent.
@@ -517,12 +528,15 @@ entryRoutes.post("/entries/:entryId/media", async (context) => {
     `).bind(entryId, mediaId, input.placement, input.caption);
 
   const existingMedia = await context.env.DB.prepare(`
-    SELECT id, status, r2_key FROM media WHERE sha256 = ?1
+    SELECT id, status, r2_key, owner_subject FROM media WHERE sha256 = ?1
   `)
     .bind(upload.fingerprint)
-    .first<{ id: string; status: string; r2_key: string }>();
+    .first<{ id: string; status: string; r2_key: string; owner_subject: string | null }>();
 
   if (existingMedia) {
+    if (existingMedia.owner_subject && existingMedia.owner_subject !== ownerSubject) {
+      return apiError(context, 409, "MEDIA_FINGERPRINT_CONFLICT", "這個媒體識別碼已被其他資料使用。" );
+    }
     const alreadyLinked = await context.env.DB.prepare(`
       SELECT 1 AS linked FROM entry_media WHERE entry_id = ?1 AND media_id = ?2
     `)
@@ -534,17 +548,31 @@ entryRoutes.post("/entries/:entryId/media", async (context) => {
     // A previous failed upload left the row without a usable object: retry the
     // object write with the fresh bytes before reusing the media row.
     if (existingMedia.status !== "ready") {
+      const validatedBody = await validatedMediaBody(upload.body, input.type, upload.mimeType);
+      if (!validatedBody) {
+        return apiError(context, 400, "MEDIA_SIGNATURE_MISMATCH", "媒體內容與檔案類型不一致。" );
+      }
       try {
-        await context.env.MEDIA.put(existingMedia.r2_key, upload.body, {
+        const object = await context.env.MEDIA.put(existingMedia.r2_key, validatedBody, {
           httpMetadata: { contentType: upload.mimeType },
         });
+        if (!object || object.size !== upload.sizeBytes) {
+          await context.env.MEDIA.delete(existingMedia.r2_key);
+          throw new Error("Uploaded media size did not match its declaration");
+        }
       } catch {
         return apiError(context, 500, "MEDIA_UPLOAD_FAILED", "媒體上傳失敗，可以稍後再試一次。" );
       }
       statements.push(
         context.env.DB.prepare(`
-          UPDATE media SET status = 'ready', updated_at = ?2 WHERE id = ?1
-        `).bind(existingMedia.id, now),
+          UPDATE media SET status = 'ready', owner_subject = ?2, updated_at = ?3 WHERE id = ?1
+        `).bind(existingMedia.id, ownerSubject, now),
+      );
+    } else if (!existingMedia.owner_subject) {
+      statements.push(
+        context.env.DB.prepare(`
+          UPDATE media SET owner_subject = ?2, updated_at = ?3 WHERE id = ?1
+        `).bind(existingMedia.id, ownerSubject, now),
       );
     }
 
@@ -568,6 +596,10 @@ entryRoutes.post("/entries/:entryId/media", async (context) => {
 
   const mediaId = crypto.randomUUID();
   const r2Key = mediaR2Key("uploads", mediaId, input.sourcePath);
+  const validatedBody = await validatedMediaBody(upload.body, input.type, upload.mimeType);
+  if (!validatedBody) {
+    return apiError(context, 400, "MEDIA_SIGNATURE_MISMATCH", "媒體內容與檔案類型不一致。" );
+  }
   const uploaded = await uploadMediaObject({
     db: context.env.DB,
     bucket: context.env.MEDIA,
@@ -577,7 +609,8 @@ entryRoutes.post("/entries/:entryId/media", async (context) => {
     type: input.type,
     mimeType: upload.mimeType,
     sizeBytes: upload.sizeBytes,
-    body: upload.body,
+    body: validatedBody,
+    ownerSubject,
     now,
     successStatements: [linkStatement(mediaId)],
   });

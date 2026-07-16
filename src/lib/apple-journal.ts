@@ -1,6 +1,5 @@
 import {
   BlobReader,
-  BlobWriter,
   TextWriter,
   ZipReader,
   type Entry,
@@ -64,8 +63,15 @@ export interface AppleJournalArchivePreview {
   mediaBytes: number;
 }
 
+export interface AppleJournalMediaStream {
+  stream: ReadableStream<Uint8Array>;
+  mimeType: string;
+  sizeBytes: number;
+  finished: Promise<void>;
+}
+
 export interface AppleJournalMediaReader {
-  read(media: AppleJournalMedia): Promise<Blob>;
+  open(media: AppleJournalMedia, signal?: AbortSignal): Promise<AppleJournalMediaStream>;
   close(): Promise<void>;
 }
 
@@ -202,11 +208,10 @@ function ascii(bytes: Uint8Array, start: number, length: number): string {
   return String.fromCharCode(...bytes.slice(start, start + length));
 }
 
-async function detectMediaMimeType(
-  blob: Blob,
+function detectMediaMimeType(
+  bytes: Uint8Array,
   expectedType: AppleJournalMediaType,
-): Promise<string | null> {
-  const bytes = new Uint8Array(await blob.slice(0, 32).arrayBuffer());
+): string | null {
   const starts = (...values: number[]) => values.every((value, index) => bytes[index] === value);
 
   if (starts(0xff, 0xd8, 0xff)) return "image/jpeg";
@@ -223,8 +228,8 @@ async function detectMediaMimeType(
     const brand = ascii(bytes, 8, 4).toLowerCase();
     if (["heic", "heix", "hevc", "hevx"].includes(brand)) return "image/heic";
     if (["mif1", "msf1"].includes(brand)) return "image/heif";
-    if (brand === "qt  ") return "video/quicktime";
     if (expectedType === "audio") return "audio/mp4";
+    if (brand === "qt  ") return "video/quicktime";
     if (expectedType === "video") return "video/mp4";
   }
 
@@ -512,15 +517,69 @@ export async function createAppleJournalMediaReader(file: File): Promise<AppleJo
   );
 
   return {
-    async read(media) {
+    async open(media, signal) {
       const entry = filesByPath.get(media.archivePath) ?? filesByLowerPath.get(media.archivePath.toLowerCase());
       if (!entry) throw new AppleJournalArchiveError("找不到其中一個日記媒體。");
-      const blob = await entry.getData(new BlobWriter(media.mimeType));
-      const detectedMimeType = await detectMediaMimeType(blob, media.type);
+
+      const transform = new TransformStream<Uint8Array, Uint8Array>();
+      const finished = entry.getData(transform.writable, { signal }).then(() => undefined);
+      // Cancellation intentionally rejects extraction; attach a handler now so
+      // a later API failure cannot create an unhandled rejection.
+      void finished.catch(() => undefined);
+      const reader = transform.readable.getReader();
+      const initialChunks: Uint8Array[] = [];
+      let initialSize = 0;
+
+      try {
+        while (initialSize < 32) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          initialChunks.push(value);
+          initialSize += value.byteLength;
+        }
+      } catch (error) {
+        await reader.cancel(error).catch(() => undefined);
+        throw error;
+      }
+
+      const prefix = new Uint8Array(Math.min(initialSize, 32));
+      let prefixOffset = 0;
+      for (const chunk of initialChunks) {
+        const length = Math.min(chunk.byteLength, prefix.byteLength - prefixOffset);
+        prefix.set(chunk.subarray(0, length), prefixOffset);
+        prefixOffset += length;
+        if (prefixOffset === prefix.byteLength) break;
+      }
+      const detectedMimeType = detectMediaMimeType(prefix, media.type);
       if (!detectedMimeType) {
+        await reader.cancel().catch(() => undefined);
         throw new AppleJournalArchiveError("其中一個媒體的簽章與副檔名不一致。");
       }
-      return blob.type === detectedMimeType ? blob : blob.slice(0, blob.size, detectedMimeType);
+
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          for (const chunk of initialChunks) controller.enqueue(chunk);
+        },
+        async pull(controller) {
+          try {
+            const { done, value } = await reader.read();
+            if (done) controller.close();
+            else controller.enqueue(value);
+          } catch (error) {
+            controller.error(error);
+          }
+        },
+        cancel(reason) {
+          return reader.cancel(reason);
+        },
+      });
+
+      return {
+        stream,
+        mimeType: detectedMimeType,
+        sizeBytes: entry.uncompressedSize,
+        finished,
+      };
     },
     close: () => reader.close(),
   };

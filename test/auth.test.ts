@@ -193,6 +193,104 @@ describe("session cookie guard", () => {
     expect(response.status).toBe(201);
   });
 
+  it("protects multipart media init, part, and complete with the owner session and Origin", async () => {
+    const localStart = await exports.default.fetch(
+      new Request("http://localhost/api/imports/apple-journal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fileName: "SyntheticAuthArchive.zip",
+          fileFingerprint: "d".repeat(64),
+          entryCount: 1,
+          mediaCount: 1,
+        }),
+      }),
+    );
+    const importJob = await localStart.json<{ id: string }>();
+    const localEntry = await exports.default.fetch(
+      new Request(`http://localhost/api/imports/apple-journal/${importJob.id}/entries`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourcePath: "Synthetic/Entries/auth.html",
+          title: "合成授權測試",
+          body: "不含私人資料的測試內容。",
+          occurredAt: "2026-07-17T00:00:00.000Z",
+          timezone: "Asia/Taipei",
+          localDate: "2026-07-17",
+          location: null,
+          mood: null,
+        }),
+      }),
+    );
+    const entry = await localEntry.json<{ id: string }>();
+    const base = `/api/imports/apple-journal/${importJob.id}/entries/${entry.id}/media/uploads`;
+    const initBody = JSON.stringify({
+      fingerprint: "e".repeat(64),
+      sourcePath: "Synthetic/Resources/auth.png",
+      type: "photo",
+      mimeType: "image/png",
+      sizeBytes: 8,
+      position: 0,
+      placement: "cover",
+      caption: "",
+    });
+
+    const denied = await remoteRequest(base, {
+      method: "POST",
+      headers: { Origin: REMOTE_ORIGIN, "Content-Type": "application/json" },
+      body: initBody,
+    });
+    await expectErrorCode(denied, 401, "AUTH_REQUIRED");
+
+    const token = await insertSession();
+    const authHeaders = {
+      Cookie: `${SESSION_COOKIE}=${token}`,
+      Origin: REMOTE_ORIGIN,
+    };
+    const startedResponse = await remoteRequest(base, {
+      method: "POST",
+      headers: { ...authHeaders, "Content-Type": "application/json" },
+      body: initBody,
+    });
+    expect(startedResponse.status).toBe(201);
+    const started = await startedResponse.json<{ id: string }>();
+    const partPath = `${base}/${started.id}/parts/1`;
+    const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+
+    const crossSite = await remoteRequest(partPath, {
+      method: "PUT",
+      headers: {
+        Cookie: `${SESSION_COOKIE}=${token}`,
+        Origin: "https://cross-site.example",
+        "Content-Type": "image/png",
+        "X-Media-Size": "8",
+      },
+      body: png,
+    });
+    await expectErrorCode(crossSite, 403, "INVALID_ORIGIN");
+
+    const uploaded = await remoteRequest(partPath, {
+      method: "PUT",
+      headers: {
+        ...authHeaders,
+        "Content-Type": "image/png",
+        "X-Media-Size": "8",
+      },
+      body: png,
+    });
+    expect(uploaded.status).toBe(201);
+    const completed = await remoteRequest(`${base}/${started.id}/complete`, {
+      method: "POST",
+      headers: authHeaders,
+    });
+    expect(completed.status).toBe(201);
+    const media = await env.DB.prepare(`SELECT owner_subject, status FROM media WHERE id = ?1`)
+      .bind(started.id)
+      .first<{ owner_subject: string; status: string }>();
+    expect(media).toEqual({ owner_subject: TEST_ALLOWED_SUBJECT, status: "ready" });
+  });
+
   it("reports an authenticated remote session with user info", async () => {
     const token = await insertSession({ displayName: "PG", email: "pg@example.test" });
     const response = await remoteRequest("/api/auth/session", {

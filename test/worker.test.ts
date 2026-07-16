@@ -157,10 +157,10 @@ describe("diary Worker API", () => {
           method: "POST",
           headers: {
             "Content-Type": "image/png",
-            "Content-Length": "4",
+            "Content-Length": "8",
             "X-Media-Fingerprint": mediaFingerprint,
           },
-          body: new Uint8Array([137, 80, 78, 71]),
+          body: new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
         },
       ),
     );
@@ -190,7 +190,7 @@ describe("diary Worker API", () => {
     );
     expect(storedMediaResponse.status).toBe(200);
     expect(new Uint8Array(await storedMediaResponse.arrayBuffer())).toEqual(
-      new Uint8Array([137, 80, 78, 71]),
+      new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
     );
   });
 });

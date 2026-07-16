@@ -11,7 +11,13 @@ import type {
 } from "../../shared/api";
 import { buildExcerpt, countWords } from "../lib/entry-content";
 import { apiError, noStore } from "../lib/http";
-import { mediaR2Key, parseMediaUpload, uploadMediaObject } from "../lib/media";
+import type { AuthVariables } from "../lib/auth/middleware";
+import {
+  mediaR2Key,
+  parseMediaUpload,
+  uploadMediaObject,
+  validatedMediaBody,
+} from "../lib/media";
 
 const startImportSchema = z.object({
   fileName: z.string().trim().min(1).max(255),
@@ -53,9 +59,19 @@ interface ExistingEntryRow {
 
 interface ExistingMediaRow {
   id: string;
+  r2_key: string;
+  status: string;
+  owner_subject: string | null;
 }
 
-export const importRoutes = new Hono<{ Bindings: Env }>();
+export const importRoutes = new Hono<{ Bindings: Env; Variables: AuthVariables }>();
+
+function uploadOwnerSubject(context: { get(key: "auth"): AuthVariables["auth"] }): string | null {
+  const auth = context.get("auth");
+  if (auth.mode === "session") return auth.subject;
+  if (auth.mode === "local") return "local-development";
+  return null;
+}
 
 async function sha256(value: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
@@ -338,13 +354,24 @@ importRoutes.post("/imports/apple-journal/:importId/entries/:entryId/media", asy
   if (!entry) return apiError(context, 404, "ENTRY_NOT_FOUND", "找不到這篇匯入日記。");
 
   const input = query.data;
-  const existingMedia = await context.env.DB.prepare(`SELECT id FROM media WHERE sha256 = ?1`)
+  const ownerSubject = uploadOwnerSubject(context);
+  if (!ownerSubject) return apiError(context, 403, "UPLOAD_NOT_ALLOWED", "沒有權限上傳這個媒體。");
+  const existingMedia = await context.env.DB.prepare(`
+    SELECT id, r2_key, status, owner_subject FROM media WHERE sha256 = ?1
+  `)
     .bind(upload.fingerprint)
     .first<ExistingMediaRow>();
   const now = new Date().toISOString();
 
-  if (existingMedia) {
+  if (existingMedia?.owner_subject && existingMedia.owner_subject !== ownerSubject) {
+    return apiError(context, 409, "MEDIA_FINGERPRINT_CONFLICT", "這個媒體識別碼已被其他資料使用。");
+  }
+
+  if (existingMedia?.status === "ready") {
     await context.env.DB.batch([
+      context.env.DB.prepare(`
+        UPDATE media SET owner_subject = ?2, updated_at = ?3 WHERE id = ?1
+      `).bind(existingMedia.id, ownerSubject, now),
       context.env.DB.prepare(`
         INSERT OR IGNORE INTO entry_media (
           entry_id, media_id, position, placement, caption
@@ -370,6 +397,54 @@ importRoutes.post("/imports/apple-journal/:importId/entries/:entryId/media", asy
     return context.json(response);
   }
 
+  const validatedBody = await validatedMediaBody(upload.body, input.type, upload.mimeType);
+  if (!validatedBody) {
+    return apiError(context, 400, "MEDIA_SIGNATURE_MISMATCH", "媒體內容與檔案類型不一致。");
+  }
+
+  if (existingMedia) {
+    try {
+      const object = await context.env.MEDIA.put(existingMedia.r2_key, validatedBody, {
+        httpMetadata: { contentType: upload.mimeType },
+      });
+      if (!object || object.size !== upload.sizeBytes) {
+        await context.env.MEDIA.delete(existingMedia.r2_key);
+        throw new Error("Uploaded media size did not match its declaration");
+      }
+    } catch {
+      return apiError(context, 500, "MEDIA_UPLOAD_FAILED", "媒體上傳失敗，可以重新匯入後續傳。");
+    }
+    await context.env.DB.batch([
+      context.env.DB.prepare(`
+        UPDATE media SET
+          status = 'ready', owner_subject = ?2, mime_type = ?3,
+          size_bytes = ?4, updated_at = ?5
+        WHERE id = ?1
+      `).bind(existingMedia.id, ownerSubject, upload.mimeType, upload.sizeBytes, now),
+      context.env.DB.prepare(`
+        INSERT OR IGNORE INTO entry_media (
+          entry_id, media_id, position, placement, caption
+        ) VALUES (?1, ?2, ?3, ?4, ?5)
+      `).bind(entryId, existingMedia.id, input.position, input.placement, input.caption),
+      importItemStatement(context.env.DB, {
+        id: crypto.randomUUID(),
+        importId,
+        sourcePath: input.sourcePath,
+        sourceId: existingMedia.id,
+        checksum: upload.fingerprint,
+        kind: "media",
+        status: "completed",
+        now,
+      }),
+    ]);
+    const response: ImportAppleJournalMediaResponse = {
+      id: existingMedia.id,
+      disposition: "inserted",
+    };
+    noStore(context);
+    return context.json(response, 201);
+  }
+
   const mediaId = crypto.randomUUID();
   const r2Key = mediaR2Key("imports", mediaId, input.sourcePath);
   const uploaded = await uploadMediaObject({
@@ -381,7 +456,8 @@ importRoutes.post("/imports/apple-journal/:importId/entries/:entryId/media", asy
     type: input.type,
     mimeType: upload.mimeType,
     sizeBytes: upload.sizeBytes,
-    body: upload.body,
+    body: validatedBody,
+    ownerSubject,
     now,
     successStatements: [
       context.env.DB.prepare(`

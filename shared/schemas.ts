@@ -11,11 +11,13 @@ import type {
   RemoveEntryMediaResponse,
   RestoreEntryResponse,
   SessionResponse,
+  StartAppleJournalMediaUploadResponse,
   StartAppleJournalImportResponse,
   TimelineResponse,
   UpdateEntryInput,
   UpdateEntryResponse,
   UploadEntryMediaResponse,
+  UploadAppleJournalMediaPartResponse,
 } from "./api";
 
 const mediaPreviewSchema = z.object({
@@ -149,6 +151,24 @@ export const importAppleJournalMediaResponseSchema = z.object({
   id: z.string(),
   disposition: z.enum(["inserted", "duplicate"]),
 }) satisfies z.ZodType<ImportAppleJournalMediaResponse>;
+
+export const startAppleJournalMediaUploadResponseSchema = z.discriminatedUnion("disposition", [
+  z.object({
+    id: z.string(),
+    disposition: z.literal("duplicate"),
+  }),
+  z.object({
+    id: z.string(),
+    disposition: z.literal("uploading"),
+    partSize: z.number().int().positive(),
+    partCount: z.number().int().positive(),
+    uploadedParts: z.array(z.number().int().positive()),
+  }),
+]) satisfies z.ZodType<StartAppleJournalMediaUploadResponse>;
+
+export const uploadAppleJournalMediaPartResponseSchema = z.object({
+  partNumber: z.number().int().positive(),
+}) satisfies z.ZodType<UploadAppleJournalMediaPartResponse>;
 
 export const completeAppleJournalImportResponseSchema = z.object({
   status: z.enum(["completed", "completed-with-errors"]),
