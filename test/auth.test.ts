@@ -257,7 +257,8 @@ describe("session cookie guard", () => {
     });
     expect(startedResponse.status).toBe(201);
     const started = await startedResponse.json<{ id: string }>();
-    const partPath = `${base}/${started.id}/parts/1`;
+    const generationQuery = `generationId=${encodeURIComponent(entry.generationId)}`;
+    const partPath = `${base}/${started.id}/parts/1?${generationQuery}`;
     const png = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
 
     const crossSite = await remoteRequest(partPath, {
@@ -282,7 +283,7 @@ describe("session cookie guard", () => {
       body: png,
     });
     expect(uploaded.status).toBe(201);
-    const completed = await remoteRequest(`${base}/${started.id}/complete`, {
+    const completed = await remoteRequest(`${base}/${started.id}/complete?${generationQuery}`, {
       method: "POST",
       headers: authHeaders,
     });

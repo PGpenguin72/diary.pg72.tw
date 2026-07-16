@@ -287,6 +287,10 @@ function mediaUploadBaseUrl(importId: string, entryId: string): string {
   return `/api/imports/apple-journal/${encodeURIComponent(importId)}/entries/${encodeURIComponent(entryId)}/media/uploads`;
 }
 
+function withUploadGeneration(url: string, generationId: string): string {
+  return `${url}?generationId=${encodeURIComponent(generationId)}`;
+}
+
 function shouldRetryUpload(error: unknown): boolean {
   return !(error instanceof ApiRequestError) || error.status === 429 || error.status >= 500;
 }
@@ -312,6 +316,7 @@ function retryDelay(attempt: number, signal?: AbortSignal): Promise<void> {
 async function uploadAppleJournalMediaPart(
   url: string,
   partNumber: number,
+  generationId: string,
   blob: Blob,
   signal?: AbortSignal,
 ): Promise<UploadAppleJournalMediaPartResponse> {
@@ -320,7 +325,7 @@ async function uploadAppleJournalMediaPart(
   for (let attempt = 0; attempt < MEDIA_PART_ATTEMPTS; attempt += 1) {
     try {
       return await requestJson(
-        `${url}/${partNumber}`,
+        withUploadGeneration(`${url}/${partNumber}`, generationId),
         uploadAppleJournalMediaPartResponseSchema,
         {
           method: "PUT",
@@ -430,7 +435,7 @@ async function uploadAppleJournalMediaMultipart(
     }
 
     const uploadUrl = `${baseUrl}/${encodeURIComponent(started.id)}`;
-    const abortUrl = `${uploadUrl}/abort`;
+    const abortUrl = withUploadGeneration(`${uploadUrl}/abort`, input.generationId);
     const abortUpload = () => {
       void fetch(abortUrl, {
         method: "POST",
@@ -468,6 +473,7 @@ async function uploadAppleJournalMediaMultipart(
       await uploadAppleJournalMediaPart(
         `${uploadUrl}/parts`,
         partNumber,
+        input.generationId,
         part,
         signal,
       );
@@ -478,7 +484,7 @@ async function uploadAppleJournalMediaMultipart(
     await partReader.expectEnd();
 
     return await requestJson(
-      `${uploadUrl}/complete`,
+      withUploadGeneration(`${uploadUrl}/complete`, input.generationId),
       importAppleJournalMediaResponseSchema,
       { method: "POST", signal },
     );

@@ -209,10 +209,10 @@ flowchart TD
 - 已實作：每篇 entry 獨立 upsert；zip.js 以 `WritableStream` + backpressure 串流解壓媒體，瀏覽器只組成目前的 8 MiB part，不先建立整個大型媒體 Blob。Worker 再以 owner-bound R2 multipart session 寫入 private R2。非最後一段符合 R2 的 5 MiB 下限，單次 request 明確低於 Cloudflare 100 MB 的最低方案上限。
 - 已實作：import job 記錄進度；重新選擇同一個 ZIP 會依 central-directory fingerprint、source path 與 canonical content hash 去重。
 - 已實作：每段最多重試三次；D1 保存 opaque R2 ETag 與已完成 part，重新選擇同一 ZIP 可從中斷處繼續。完成、取消與過期 session 都有明確狀態，failed media row 不再被誤判成成功 duplicate。
-- 已實作：part、complete 與 abort 以 D1 version/next-part compare-and-set 互斥；part reservation 有短 lease，Worker 在 R2 寫入前後中止時可由同一 part 安全接管並重寫。R2 已完成但 D1 尚未 finalize 時，以 private object head 重試 reconciliation。
+- 已實作：part、complete 與 abort 都攜帶 entry generation，並在 D1 reservation / commit 同時比對 upload row 與 entry 的 current generation；舊 generation 對 replacement upload 固定回 409。各動作再以 version/next-part compare-and-set 互斥；part reservation 有短 lease，Worker 在 R2 寫入前後中止時可由同一 part 安全接管並重寫。R2 已完成但 D1 尚未 finalize 時，以 private object head 重試 reconciliation。
 - 已實作：multipart object key 與 upload ID 只由 Worker 產生及保存，綁定 import、entry 與 PG72 ID `sub`；瀏覽器不能指定任意 R2 key。第一段會再次做 magic-signature / MIME 驗證。
 - 已實作：匯入畫面同時顯示整體 item 進度與目前媒體的 byte / part 進度，提供 ARIA progressbar/live status；entry 建立失敗時，每個未嘗試附件都會以 source path / fingerprint 明確列為 skipped，完整 bounded 清單可下載 JSON report，不以任意筆數截斷。
-- 已實作：每次 entry 匯入都取得新的 generation ID；只有在該 generation 明確重用或完成的 ready 附件能滿足 expected count。舊 generation 保留到新 generation 全部 ready，然後在同一 D1 batch publish、排入 cleanup queue 並移除 stale link。
+- 已實作：每次 entry 匯入都取得新的 generation ID；零附件 entry 在建立 batch 內立即 reconcile / publish，有附件 entry 則只有在該 generation 明確重用或完成的 ready 附件滿足 expected count 後才 publish。舊 generation 保留到新 generation 全部 ready，然後在同一 D1 batch publish、排入 cleanup queue 並移除 stale link。
 - 已實作：每日 `03:17 UTC` 的 scheduled handler 分批處理最多 50 個過期 session；active lease 不會被搶走，R2 已完成但 D1 未 finalize 的工作會先 reconciliation，其餘才 abort。`completed` / `failed` / `aborted` bookkeeping 保留 7 天；superseded media 只有在 D1 已無任何 entry 引用時，才由 durable queue 先移除 D1 row、再冪等刪除 R2 object。
 - 已實作：單次預覽最多 10,000 篇 entry、50,000 個 reconciliation items，HTML 與保留文字各限制 32 MiB；每個 ZIP path 最多 1,024 bytes、中央目錄 path metadata 合計最多 8 MiB。path traversal、絕對路徑、異常壓縮、衝突路徑及損壞 ZIP 都會在匯入前停止並顯示安全錯誤；central-directory fingerprint 只使用已通過這些上限的 path。
 - 待實作：若未來需要減少 Worker 流量，可改用 object-scoped presigned upload；目前不需要 R2 API credential 或跨網域 CORS。

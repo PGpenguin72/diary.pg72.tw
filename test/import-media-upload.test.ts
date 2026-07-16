@@ -25,6 +25,7 @@ const QUICKTIME_BYTES = new Uint8Array([
 interface UploadStateRow {
   upload_id: string;
   r2_key: string;
+  entry_generation_id: string;
   status: string;
   version: number;
   next_part: number;
@@ -33,6 +34,20 @@ interface UploadStateRow {
 
 function fingerprint(seed: number): string {
   return seed.toString(16).padStart(64, "0");
+}
+
+function syntheticEntryInput(seed: number) {
+  return {
+    sourcePath: `Synthetic/Entries/${seed}.html`,
+    mediaCount: 1,
+    title: `合成媒體測試 ${seed}`,
+    body: "這是隔離測試內容。",
+    occurredAt: "2026-07-17T00:00:00.000Z",
+    timezone: "Asia/Taipei",
+    localDate: "2026-07-17",
+    location: null,
+    mood: null,
+  };
 }
 
 async function createImportAndEntry(
@@ -56,17 +71,7 @@ async function createImportAndEntry(
     new Request(`http://localhost/api/imports/apple-journal/${importJob.id}/entries`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        sourcePath: `Synthetic/Entries/${seed}.html`,
-        mediaCount: 1,
-        title: `合成媒體測試 ${seed}`,
-        body: "這是隔離測試內容。",
-        occurredAt: "2026-07-17T00:00:00.000Z",
-        timezone: "Asia/Taipei",
-        localDate: "2026-07-17",
-        location: null,
-        mood: null,
-      }),
+      body: JSON.stringify(syntheticEntryInput(seed)),
     }),
   );
   expect(entry.status).toBe(201);
@@ -74,8 +79,26 @@ async function createImportAndEntry(
   return { importId: importJob.id, entryId: imported.id, generationId: imported.generationId };
 }
 
+async function retryImportEntry(importId: string, seed: number): Promise<string> {
+  const response = await worker.fetch(
+    new Request(`http://localhost/api/imports/apple-journal/${importId}/entries`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(syntheticEntryInput(seed)),
+    }),
+  );
+  expect(response.status).toBe(200);
+  const entry = await response.json<{ generationId: string; disposition: string }>();
+  expect(entry.disposition).toBe("duplicate");
+  return entry.generationId;
+}
+
 function uploadBase(importId: string, entryId: string): string {
   return `http://localhost/api/imports/apple-journal/${importId}/entries/${entryId}/media/uploads`;
+}
+
+function withGeneration(url: string, generationId: string): string {
+  return `${url}?generationId=${encodeURIComponent(generationId)}`;
 }
 
 async function startMediaUpload(
@@ -134,7 +157,8 @@ async function putPart(
 function readUploadState(mediaId: string): Promise<UploadStateRow | null> {
   return env.DB.prepare(`
     SELECT media_uploads.upload_id, media.r2_key, media_uploads.status,
-      media_uploads.version, media_uploads.next_part, media_uploads.active_part
+      media_uploads.entry_generation_id, media_uploads.version,
+      media_uploads.next_part, media_uploads.active_part
     FROM media_uploads
     JOIN media ON media.id = media_uploads.media_id
     WHERE media_uploads.media_id = ?1
@@ -155,7 +179,7 @@ describe("Apple Journal multipart media uploads", () => {
     if (started.payload.disposition !== "uploading") throw new Error("Expected an upload session");
 
     const part = await putPart(
-      `${base}/${started.payload.id}/parts/1`,
+      withGeneration(`${base}/${started.payload.id}/parts/1`, generationId),
       bytes,
       input.mimeType,
       bytes.byteLength,
@@ -164,7 +188,7 @@ describe("Apple Journal multipart media uploads", () => {
     expect(part.status).toBe(201);
 
     const completed = await worker.fetch(
-      new Request(`${base}/${started.payload.id}/complete`, { method: "POST" }),
+      new Request(withGeneration(`${base}/${started.payload.id}/complete`, generationId), { method: "POST" }),
     );
     expect(completed.status).toBe(201);
 
@@ -200,14 +224,14 @@ describe("Apple Journal multipart media uploads", () => {
     const started = await startMediaUpload(base, input);
     if (started.payload.disposition !== "uploading") throw new Error("Expected an upload session");
     const wrongSize = await putPart(
-      `${base}/${started.payload.id}/parts/1`,
+      withGeneration(`${base}/${started.payload.id}/parts/1`, generationId),
       PNG_BYTES,
       input.mimeType,
       PNG_BYTES.byteLength - 1,
     );
     expect(wrongSize.status).toBe(400);
     const wrongSignature = await putPart(
-      `${base}/${started.payload.id}/parts/1`,
+      withGeneration(`${base}/${started.payload.id}/parts/1`, generationId),
       QUICKTIME_BYTES.subarray(0, PNG_BYTES.byteLength),
       input.mimeType,
     );
@@ -220,7 +244,7 @@ describe("Apple Journal multipart media uploads", () => {
     }
     const oversizedBody = new Uint8Array([...PNG_BYTES, 0]);
     const acceptedStream = await putPart(
-      `${base}/${sizeMismatchStarted.payload.id}/parts/1`,
+      withGeneration(`${base}/${sizeMismatchStarted.payload.id}/parts/1`, generationId),
       oversizedBody,
       sizeMismatchInput.mimeType,
       sizeMismatchInput.sizeBytes,
@@ -228,7 +252,10 @@ describe("Apple Journal multipart media uploads", () => {
     );
     expect(acceptedStream.status).toBe(201);
     const rejectedObject = await worker.fetch(
-      new Request(`${base}/${sizeMismatchStarted.payload.id}/complete`, { method: "POST" }),
+      new Request(
+        withGeneration(`${base}/${sizeMismatchStarted.payload.id}/complete`, generationId),
+        { method: "POST" },
+      ),
     );
     expect(rejectedObject.status).toBe(500);
     const failedMedia = await env.DB.prepare(`SELECT status FROM media WHERE id = ?1`)
@@ -253,14 +280,14 @@ describe("Apple Journal multipart media uploads", () => {
     const uploadUrl = `${base}/${started.payload.id}`;
 
     const outOfBounds = await putPart(
-      `${uploadUrl}/parts/3`,
+      withGeneration(`${uploadUrl}/parts/3`, generationId),
       QUICKTIME_BYTES,
       input.mimeType,
     );
     expect(outOfBounds.status).toBe(400);
 
     const outOfOrder = await putPart(
-      `${uploadUrl}/parts/2`,
+      withGeneration(`${uploadUrl}/parts/2`, generationId),
       QUICKTIME_BYTES,
       input.mimeType,
     );
@@ -269,14 +296,14 @@ describe("Apple Journal multipart media uploads", () => {
     const firstPart = new Uint8Array(MULTIPART_PART_BYTES);
     firstPart.set(QUICKTIME_BYTES);
     const uploadedFirst = await putPart(
-      `${uploadUrl}/parts/1`,
+      withGeneration(`${uploadUrl}/parts/1`, generationId),
       firstPart,
       input.mimeType,
     );
     expect(uploadedFirst.status).toBe(201);
 
     const incomplete = await worker.fetch(
-      new Request(`${uploadUrl}/complete`, { method: "POST" }),
+      new Request(withGeneration(`${uploadUrl}/complete`, generationId), { method: "POST" }),
     );
     expect(incomplete.status).toBe(409);
 
@@ -288,7 +315,7 @@ describe("Apple Journal multipart media uploads", () => {
     });
 
     const uploadedLast = await putPart(
-      `${uploadUrl}/parts/2`,
+      withGeneration(`${uploadUrl}/parts/2`, generationId),
       QUICKTIME_BYTES,
       input.mimeType,
     );
@@ -302,18 +329,18 @@ describe("Apple Journal multipart media uploads", () => {
       UPDATE media_upload_parts SET etag = '' WHERE media_id = ?1 AND part_number = 2
     `).bind(started.payload.id).run();
     const invalidEtag = await worker.fetch(
-      new Request(`${uploadUrl}/complete`, { method: "POST" }),
+      new Request(withGeneration(`${uploadUrl}/complete`, generationId), { method: "POST" }),
     );
     expect(invalidEtag.status).toBe(409);
     await env.DB.prepare(`
       UPDATE media_upload_parts SET etag = ?2 WHERE media_id = ?1 AND part_number = 2
     `).bind(started.payload.id, storedPart.etag).run();
     const completed = await worker.fetch(
-      new Request(`${uploadUrl}/complete`, { method: "POST" }),
+      new Request(withGeneration(`${uploadUrl}/complete`, generationId), { method: "POST" }),
     );
     expect(completed.status).toBe(201);
     const completedAgain = await worker.fetch(
-      new Request(`${uploadUrl}/complete`, { method: "POST" }),
+      new Request(withGeneration(`${uploadUrl}/complete`, generationId), { method: "POST" }),
     );
     expect(completedAgain.status).toBe(200);
   });
@@ -326,9 +353,15 @@ describe("Apple Journal multipart media uploads", () => {
     if (started.payload.disposition !== "uploading") throw new Error("Expected an upload session");
     const uploadUrl = `${base}/${started.payload.id}`;
 
-    const aborted = await worker.fetch(new Request(`${uploadUrl}/abort`, { method: "POST" }));
+    const aborted = await worker.fetch(
+      new Request(withGeneration(`${uploadUrl}/abort`, generationId), { method: "POST" }),
+    );
     expect(aborted.status).toBe(204);
-    const closed = await putPart(`${uploadUrl}/parts/1`, PNG_BYTES, input.mimeType);
+    const closed = await putPart(
+      withGeneration(`${uploadUrl}/parts/1`, generationId),
+      PNG_BYTES,
+      input.mimeType,
+    );
     expect(closed.status).toBe(409);
 
     const restarted = await startMediaUpload(base, input);
@@ -351,7 +384,7 @@ describe("Apple Journal multipart media uploads", () => {
     expect([left.response.status, right.response.status].sort()).toEqual([200, 201]);
     expect(left.payload.id).toBe(right.payload.id);
     if (left.payload.disposition !== "uploading") throw new Error("Expected an upload session");
-    const partUrl = `${base}/${left.payload.id}/parts/1`;
+    const partUrl = withGeneration(`${base}/${left.payload.id}/parts/1`, generationId);
 
     const concurrent = await Promise.all([
       putPart(partUrl, PNG_BYTES, input.mimeType),
@@ -383,7 +416,7 @@ describe("Apple Journal multipart media uploads", () => {
     `).bind(started.payload.id, new Date(Date.now() - 60_000).toISOString()).run();
 
     const recovered = await putPart(
-      `${base}/${started.payload.id}/parts/1`,
+      withGeneration(`${base}/${started.payload.id}/parts/1`, generationId),
       PNG_BYTES,
       input.mimeType,
     );
@@ -416,7 +449,7 @@ describe("Apple Journal multipart media uploads", () => {
       .uploadPart(1, orphanedBytes);
 
     const recovered = await putPart(
-      `${base}/${started.payload.id}/parts/1`,
+      withGeneration(`${base}/${started.payload.id}/parts/1`, generationId),
       recoveredBytes,
       input.mimeType,
     );
@@ -435,7 +468,11 @@ describe("Apple Journal multipart media uploads", () => {
     const started = await startMediaUpload(base, input);
     if (started.payload.disposition !== "uploading") throw new Error("Expected an upload session");
     const uploadUrl = `${base}/${started.payload.id}`;
-    expect((await putPart(`${uploadUrl}/parts/1`, PNG_BYTES, input.mimeType)).status).toBe(201);
+    expect((await putPart(
+      withGeneration(`${uploadUrl}/parts/1`, generationId),
+      PNG_BYTES,
+      input.mimeType,
+    )).status).toBe(201);
     const state = await readUploadState(started.payload.id);
     const part = await env.DB.prepare(`
       SELECT part_number, etag FROM media_upload_parts WHERE media_id = ?1
@@ -454,7 +491,7 @@ describe("Apple Journal multipart media uploads", () => {
       .complete([{ partNumber: part.part_number, etag: part.etag }]);
 
     const recovered = await worker.fetch(
-      new Request(`${uploadUrl}/complete`, { method: "POST" }),
+      new Request(withGeneration(`${uploadUrl}/complete`, generationId), { method: "POST" }),
     );
     expect(recovered.status).toBe(200);
     expect(await readUploadState(started.payload.id)).toMatchObject({ status: "completed" });
@@ -469,7 +506,11 @@ describe("Apple Journal multipart media uploads", () => {
     const started = await startMediaUpload(base, input);
     if (started.payload.disposition !== "uploading") throw new Error("Expected an upload session");
     const uploadUrl = `${base}/${started.payload.id}`;
-    expect((await putPart(`${uploadUrl}/parts/1`, PNG_BYTES, input.mimeType)).status).toBe(201);
+    expect((await putPart(
+      withGeneration(`${uploadUrl}/parts/1`, generationId),
+      PNG_BYTES,
+      input.mimeType,
+    )).status).toBe(201);
     await env.DB.prepare(`
       UPDATE media_uploads SET
         status = 'completing', state_expires_at = ?2, version = version + 1
@@ -480,7 +521,7 @@ describe("Apple Journal multipart media uploads", () => {
     ).run();
 
     const recovered = await worker.fetch(
-      new Request(`${uploadUrl}/complete`, { method: "POST" }),
+      new Request(withGeneration(`${uploadUrl}/complete`, generationId), { method: "POST" }),
     );
     expect(recovered.status).toBe(201);
     expect(await readUploadState(started.payload.id)).toMatchObject({ status: "completed" });
@@ -493,11 +534,21 @@ describe("Apple Journal multipart media uploads", () => {
     const started = await startMediaUpload(base, input);
     if (started.payload.disposition !== "uploading") throw new Error("Expected an upload session");
     const uploadUrl = `${base}/${started.payload.id}`;
-    expect((await putPart(`${uploadUrl}/parts/1`, PNG_BYTES, input.mimeType)).status).toBe(201);
+    expect((await putPart(
+      withGeneration(`${uploadUrl}/parts/1`, generationId),
+      PNG_BYTES,
+      input.mimeType,
+    )).status).toBe(201);
 
     const [completed, aborted] = await Promise.all([
-      worker.fetch(new Request(`${uploadUrl}/complete`, { method: "POST" })),
-      worker.fetch(new Request(`${uploadUrl}/abort`, { method: "POST" })),
+      worker.fetch(new Request(
+        withGeneration(`${uploadUrl}/complete`, generationId),
+        { method: "POST" },
+      )),
+      worker.fetch(new Request(
+        withGeneration(`${uploadUrl}/abort`, generationId),
+        { method: "POST" },
+      )),
     ]);
     const terminal = await readUploadState(started.payload.id);
     expect(["completed", "aborted"]).toContain(terminal?.status);
@@ -517,7 +568,9 @@ describe("Apple Journal multipart media uploads", () => {
     `).bind(importId, started.payload.id).first<{ status: string }>();
     expect(item?.status).toBe(terminal?.status === "completed" ? "completed" : "failed");
 
-    const abortAgain = await worker.fetch(new Request(`${uploadUrl}/abort`, { method: "POST" }));
+    const abortAgain = await worker.fetch(
+      new Request(withGeneration(`${uploadUrl}/abort`, generationId), { method: "POST" }),
+    );
     expect(abortAgain.status).toBe(204);
     expect((await readUploadState(started.payload.id))?.status).toBe(terminal?.status);
   });
@@ -594,6 +647,84 @@ describe("Apple Journal multipart media uploads", () => {
     expect(after).toMatchObject({ status: "uploading", active_part: null });
   });
 
+  it.each([
+    { action: "part" as const, seed: 121 },
+    { action: "complete" as const, seed: 122 },
+    { action: "abort" as const, seed: 123 },
+  ])("rejects a stale generation $action without changing its replacement upload", async ({
+    action,
+    seed,
+  }) => {
+    const { importId, entryId, generationId: staleGenerationId } =
+      await createImportAndEntry(seed);
+    const base = uploadBase(importId, entryId);
+    const input = mediaInput(seed + 2_000, PNG_BYTES, staleGenerationId);
+    const original = await startMediaUpload(base, input);
+    if (original.payload.disposition !== "uploading") throw new Error("Expected an upload session");
+    const originalState = await readUploadState(original.payload.id);
+    if (!originalState) throw new Error("Expected the original upload state");
+
+    const currentGenerationId = await retryImportEntry(importId, seed);
+    expect(currentGenerationId).not.toBe(staleGenerationId);
+    const replacement = await startMediaUpload(base, {
+      ...input,
+      generationId: currentGenerationId,
+    });
+    expect(replacement.response.status).toBe(201);
+    expect(replacement.payload).toMatchObject({
+      id: original.payload.id,
+      disposition: "uploading",
+      uploadedParts: [],
+    });
+    const replacementState = await readUploadState(original.payload.id);
+    if (!replacementState) throw new Error("Expected the replacement upload state");
+    expect(replacementState).toMatchObject({
+      entry_generation_id: currentGenerationId,
+      status: "uploading",
+      next_part: 1,
+    });
+    expect(replacementState.upload_id).not.toBe(originalState.upload_id);
+    expect(await env.MEDIA.head(replacementState.r2_key)).toBeNull();
+
+    const staleUrl = `${base}/${original.payload.id}`;
+    const staleResponse = action === "part"
+      ? await putPart(
+          withGeneration(`${staleUrl}/parts/1`, staleGenerationId),
+          PNG_BYTES,
+          input.mimeType,
+        )
+      : await worker.fetch(new Request(
+          withGeneration(`${staleUrl}/${action}`, staleGenerationId),
+          { method: "POST" },
+        ));
+    expect(staleResponse.status).toBe(409);
+    expect(await staleResponse.json()).toMatchObject({
+      error: { code: "ENTRY_IMPORT_GENERATION_CHANGED" },
+    });
+    expect(await readUploadState(original.payload.id)).toEqual(replacementState);
+    expect(await env.MEDIA.head(replacementState.r2_key)).toBeNull();
+
+    const currentUploadUrl = `${base}/${original.payload.id}`;
+    expect((await putPart(
+      withGeneration(`${currentUploadUrl}/parts/1`, currentGenerationId),
+      PNG_BYTES,
+      input.mimeType,
+    )).status).toBe(201);
+    expect((await worker.fetch(new Request(
+      withGeneration(`${currentUploadUrl}/complete`, currentGenerationId),
+      { method: "POST" },
+    ))).status).toBe(201);
+    expect(await readUploadState(original.payload.id)).toMatchObject({
+      upload_id: replacementState.upload_id,
+      entry_generation_id: currentGenerationId,
+      status: "completed",
+    });
+    expect((await env.MEDIA.head(replacementState.r2_key))?.size).toBe(PNG_BYTES.byteLength);
+    expect(
+      (await worker.fetch(new Request(`http://localhost/api/entries/${entryId}`))).status,
+    ).toBe(200);
+  });
+
   it("cleanup reconciles an R2 completion left behind before its D1 commit", async () => {
     const { importId, entryId, generationId } = await createImportAndEntry(114);
     const base = uploadBase(importId, entryId);
@@ -601,7 +732,11 @@ describe("Apple Journal multipart media uploads", () => {
     const started = await startMediaUpload(base, input);
     if (started.payload.disposition !== "uploading") throw new Error("Expected an upload session");
     const uploadUrl = `${base}/${started.payload.id}`;
-    expect((await putPart(`${uploadUrl}/parts/1`, PNG_BYTES, input.mimeType)).status).toBe(201);
+    expect((await putPart(
+      withGeneration(`${uploadUrl}/parts/1`, generationId),
+      PNG_BYTES,
+      input.mimeType,
+    )).status).toBe(201);
     const state = await readUploadState(started.payload.id);
     const part = await env.DB.prepare(`
       SELECT part_number, etag FROM media_upload_parts WHERE media_id = ?1
@@ -662,8 +797,15 @@ describe("Apple Journal multipart media uploads", () => {
     const completedStarted = await startMediaUpload(completedBase, completedInput);
     if (completedStarted.payload.disposition !== "uploading") throw new Error("Expected an upload session");
     const completedUrl = `${completedBase}/${completedStarted.payload.id}`;
-    expect((await putPart(`${completedUrl}/parts/1`, PNG_BYTES, completedInput.mimeType)).status).toBe(201);
-    expect((await worker.fetch(new Request(`${completedUrl}/complete`, { method: "POST" }))).status).toBe(201);
+    expect((await putPart(
+      withGeneration(`${completedUrl}/parts/1`, completed.generationId),
+      PNG_BYTES,
+      completedInput.mimeType,
+    )).status).toBe(201);
+    expect((await worker.fetch(new Request(
+      withGeneration(`${completedUrl}/complete`, completed.generationId),
+      { method: "POST" },
+    ))).status).toBe(201);
     await env.DB.prepare(`
       UPDATE media_uploads SET updated_at = ?2 WHERE media_id = ?1
     `).bind(
