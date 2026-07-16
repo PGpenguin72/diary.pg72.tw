@@ -43,3 +43,11 @@
 ## 狀態
 
 整站視覺統一完成：token、accent sweep、元件規格、環境光背景、殘留清掃皆已 commit。未 push、未部署。刻意保留項見「決策紀錄」（serif 長文、journal-color、語意色）。
+
+## 最終稽核（2026-07-17）
+
+- [x] 桌面 Overview、Timeline、Apple Journal 匯入、entry detail 與 media lightbox 已以 Playwright 截圖人工檢視；手機 Overview 無水平溢位，底部導覽未遮蔽內容。
+- [x] 鍵盤 `:focus-visible`、`prefers-reduced-motion`、固定 media 尺寸與 responsive dialog 規則仍完整。
+- [x] 全站 `letter-spacing` 歸零，避免 mono 小標在窄螢幕被過度撐開；保留 mono/uppercase 層級，但不以字距製造視覺層次。
+- [x] Timeline 截圖會等待 `view-in` 淡入完成後再捕捉，避免把轉場中途的低 opacity 誤判為實際對比度。
+- [x] 未新增產品邏輯、API、auth、資料或 production 變更；本輪仍未 push、未部署。

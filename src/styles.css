@@ -372,7 +372,7 @@ img {
   font-family: var(--mono);
   font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.18em;
+  letter-spacing: 0;
   text-transform: uppercase;
 }
 

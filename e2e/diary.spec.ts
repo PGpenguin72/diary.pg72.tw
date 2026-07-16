@@ -325,5 +325,8 @@ test("@desktop timeline cards use ordered masonry columns", async ({ page }, tes
     expect(gap).toBeLessThanOrEqual(20);
   }
 
+  await expect.poll(() => page.locator(".view-section").evaluate((element) =>
+    getComputedStyle(element).opacity,
+  )).toBe("1");
   await page.screenshot({ path: testInfo.outputPath("timeline-masonry.png"), fullPage: true });
 });
