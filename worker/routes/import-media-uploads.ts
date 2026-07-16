@@ -99,6 +99,16 @@ interface PartRow {
   size_bytes: number;
 }
 
+interface UploadFence {
+  uploadId: string;
+  generationId: string;
+  version: number;
+  status: UploadRow["status"];
+  requireCurrentGeneration: boolean;
+}
+
+type FinalizeUploadResult = "completed" | "generation-changed" | "state-changed";
+
 export const importMediaUploadRoutes = new Hono<{
   Bindings: Env;
   Variables: AuthVariables;
@@ -129,6 +139,7 @@ function importItemStatement(
     status: "processing" | "completed" | "duplicate" | "failed";
     errorCode?: string | null;
     requiredUploadStatus?: "completed" | "failed" | "aborted";
+    uploadFence?: UploadFence;
     now: string;
   },
 ): D1PreparedStatement {
@@ -139,7 +150,22 @@ function importItemStatement(
     )
     SELECT ?1, ?2, ?3, ?4, ?5, 'media', ?6, ?7, ?8, ?8
     WHERE ?9 IS NULL OR EXISTS (
-      SELECT 1 FROM media_uploads WHERE media_id = ?4 AND status = ?9
+      SELECT 1 FROM media_uploads
+      WHERE media_id = ?4 AND status = ?9
+        AND (
+          ?10 IS NULL
+          OR (
+            upload_id = ?10 AND entry_generation_id = ?11 AND version = ?12
+            AND (
+              ?13 = 0
+              OR EXISTS (
+                SELECT 1 FROM entries
+                WHERE entries.id = media_uploads.entry_id
+                  AND entries.import_generation_id = ?11
+              )
+            )
+          )
+        )
     )
     ON CONFLICT(import_id, source_path) DO UPDATE SET
       source_id = excluded.source_id,
@@ -158,6 +184,10 @@ function importItemStatement(
     input.errorCode ?? null,
     input.now,
     input.requiredUploadStatus ?? null,
+    input.uploadFence?.uploadId ?? null,
+    input.uploadFence?.generationId ?? null,
+    input.uploadFence?.version ?? null,
+    input.uploadFence?.requireCurrentGeneration ? 1 : 0,
   );
 }
 
@@ -205,6 +235,17 @@ function uploadMatchesCurrentGeneration(upload: UploadRow, generationId: string)
   );
 }
 
+async function entryGenerationIsCurrent(
+  database: D1Database,
+  entryId: string,
+  generationId: string,
+): Promise<boolean> {
+  const entry = await database.prepare(`
+    SELECT import_generation_id FROM entries WHERE id = ?1
+  `).bind(entryId).first<{ import_generation_id: string | null }>();
+  return entry?.import_generation_id === generationId;
+}
+
 function importedMediaLinkStatement(
   database: D1Database,
   input: {
@@ -214,6 +255,7 @@ function importedMediaLinkStatement(
     position: number;
     placement: "inline" | "grid" | "cover";
     caption: string;
+    uploadFence?: UploadFence;
   },
 ): D1PreparedStatement {
   return database.prepare(`
@@ -225,6 +267,23 @@ function importedMediaLinkStatement(
       SELECT 1 FROM entries
       WHERE id = ?1 AND source = 'apple_journal' AND import_generation_id = ?2
     )
+      AND (
+        ?7 IS NULL
+        OR EXISTS (
+          SELECT 1 FROM media_uploads
+          WHERE media_id = ?3 AND entry_id = ?1
+            AND upload_id = ?7 AND entry_generation_id = ?2
+            AND version = ?8 AND status = ?9
+            AND (
+              ?10 = 0
+              OR EXISTS (
+                SELECT 1 FROM entries
+                WHERE entries.id = media_uploads.entry_id
+                  AND entries.import_generation_id = ?2
+              )
+            )
+        )
+      )
     ON CONFLICT(entry_id, media_id) DO UPDATE SET
       position = excluded.position,
       placement = excluded.placement,
@@ -237,6 +296,10 @@ function importedMediaLinkStatement(
     input.position,
     input.placement,
     input.caption,
+    input.uploadFence?.uploadId ?? null,
+    input.uploadFence?.version ?? null,
+    input.uploadFence?.status ?? null,
+    input.uploadFence?.requireCurrentGeneration ? 1 : 0,
   );
 }
 
@@ -245,24 +308,32 @@ async function finalizeUpload(
   upload: UploadRow,
   fingerprint: string,
   requiredGenerationId?: string,
-): Promise<boolean> {
+): Promise<FinalizeUploadResult> {
   const now = new Date().toISOString();
-  await database.batch([
+  const generationId = requiredGenerationId ?? upload.entry_generation_id;
+  const requireCurrentGeneration = requiredGenerationId !== undefined;
+  const completedFence: UploadFence = {
+    uploadId: upload.upload_id,
+    generationId,
+    version: upload.version + 1,
+    status: "completed",
+    requireCurrentGeneration,
+  };
+  const results = await database.batch([
     database.prepare(`
       UPDATE media_uploads SET
         status = 'completed', active_part = NULL, active_part_expires_at = NULL,
         state_expires_at = NULL, version = version + 1, updated_at = ?4
       WHERE media_id = ?1 AND owner_subject = ?2
         AND status = 'completing' AND version = ?3
+        AND upload_id = ?5 AND entry_generation_id = ?6
+        AND entry_id = ?7 AND import_id = ?8
         AND (
-          ?5 IS NULL
-          OR (
-            entry_generation_id = ?5
-            AND EXISTS (
-              SELECT 1 FROM entries
-              WHERE entries.id = media_uploads.entry_id
-                AND entries.import_generation_id = ?5
-            )
+          ?9 = 0
+          OR EXISTS (
+            SELECT 1 FROM entries
+            WHERE entries.id = media_uploads.entry_id
+              AND entries.import_generation_id = ?6
           )
         )
     `).bind(
@@ -270,22 +341,47 @@ async function finalizeUpload(
       upload.owner_subject,
       upload.version,
       now,
-      requiredGenerationId ?? null,
+      upload.upload_id,
+      generationId,
+      upload.entry_id,
+      upload.import_id,
+      requireCurrentGeneration ? 1 : 0,
     ),
     database.prepare(`
       UPDATE media SET status = 'ready', updated_at = ?2
       WHERE id = ?1 AND EXISTS (
         SELECT 1 FROM media_uploads
-        WHERE media_id = ?1 AND status = 'completed'
+        WHERE media_id = ?1 AND upload_id = ?3
+          AND entry_id = ?4 AND import_id = ?5
+          AND entry_generation_id = ?6 AND version = ?7
+          AND status = 'completed'
+          AND (
+            ?8 = 0
+            OR EXISTS (
+              SELECT 1 FROM entries
+              WHERE entries.id = media_uploads.entry_id
+                AND entries.import_generation_id = ?6
+            )
+          )
       )
-    `).bind(upload.media_id, now),
+    `).bind(
+      upload.media_id,
+      now,
+      upload.upload_id,
+      upload.entry_id,
+      upload.import_id,
+      generationId,
+      completedFence.version,
+      requireCurrentGeneration ? 1 : 0,
+    ),
     importedMediaLinkStatement(database, {
       entryId: upload.entry_id,
-      generationId: upload.entry_generation_id,
+      generationId,
       mediaId: upload.media_id,
       position: upload.position,
       placement: upload.placement,
       caption: upload.caption,
+      uploadFence: completedFence,
     }),
     importItemStatement(database, {
       importId: upload.import_id,
@@ -294,18 +390,33 @@ async function finalizeUpload(
       checksum: fingerprint,
       status: "completed",
       requiredUploadStatus: "completed",
+      uploadFence: completedFence,
       now,
     }),
     ...reconcileImportedEntryStatements(
       database,
       upload.entry_id,
-      upload.entry_generation_id,
+      generationId,
       now,
     ),
   ]);
-
-  const completed = await uploadRowQuery(database, upload.media_id);
-  return completed?.status === "completed" && completed.media_status === "ready";
+  if (results[0]?.meta.changes !== 1) {
+    if (
+      requireCurrentGeneration &&
+      !await entryGenerationIsCurrent(database, upload.entry_id, generationId)
+    ) {
+      return "generation-changed";
+    }
+    return "state-changed";
+  }
+  if (
+    results[1]?.meta.changes !== 1 ||
+    results[2]?.meta.changes !== 1 ||
+    results[3]?.meta.changes !== 1
+  ) {
+    return "state-changed";
+  }
+  return "completed";
 }
 
 function uploadResponse(
@@ -459,7 +570,7 @@ importMediaUploadRoutes.post(
 
         if (currentUpload && currentUpload.status !== "completed") {
           const finalized = await finalizeUpload(context.env.DB, currentUpload, input.fingerprint);
-          if (!finalized) {
+          if (finalized !== "completed") {
             return apiError(context, 409, "MEDIA_UPLOAD_BUSY", "媒體正在由另一個上傳工作處理。");
           }
         }
@@ -798,7 +909,8 @@ export async function cleanupQueuedMedia(env: Env): Promise<MediaCleanupResult> 
     try {
       const removed = await env.DB.prepare(`
         DELETE FROM media
-        WHERE id = ?1 AND r2_key = ?2 AND storage_kind = 'private_r2' AND status = 'ready'
+        WHERE id = ?1 AND r2_key = ?2 AND storage_kind = 'private_r2'
+          AND status IN ('ready', 'failed')
           AND NOT EXISTS (
             SELECT 1 FROM entry_media WHERE media_id = media.id
           )
@@ -919,7 +1031,7 @@ export async function cleanupExpiredMediaUploads(
       if (upload.status === "completing") {
         const object = await env.MEDIA.head(upload.r2_key);
         if (object?.size === upload.size_bytes) {
-          if (await finalizeUpload(env.DB, upload, upload.fingerprint)) result.finalized += 1;
+          if (await finalizeUpload(env.DB, upload, upload.fingerprint) === "completed") result.finalized += 1;
           else result.skipped += 1;
           continue;
         }
@@ -975,7 +1087,7 @@ export async function cleanupExpiredMediaUploads(
               version: abortVersion + 1,
             },
             upload.fingerprint,
-          )
+          ) === "completed"
         ) {
           result.finalized += 1;
         } else {
@@ -1116,7 +1228,7 @@ importMediaUploadRoutes.put(
         status = 'part_uploading', active_part = ?4, active_part_expires_at = ?5,
         version = version + 1, updated_at = ?6
       WHERE media_id = ?1 AND owner_subject = ?2 AND version = ?3 AND next_part = ?4
-        AND entry_generation_id = ?7
+        AND upload_id = ?8 AND entry_generation_id = ?7
         AND EXISTS (
           SELECT 1 FROM entries
           WHERE entries.id = media_uploads.entry_id
@@ -1137,6 +1249,7 @@ importMediaUploadRoutes.put(
       leaseExpiresAt,
       nowIso,
       generation.data.generationId,
+      upload.upload_id,
     ).run();
     if (reserved.meta.changes !== 1) {
       await body.cancel().catch(() => undefined);
@@ -1160,21 +1273,35 @@ importMediaUploadRoutes.put(
       return apiError(context, 409, "MEDIA_PART_BUSY", "這個媒體分段正在由另一個請求處理。");
     }
     const reservationVersion = upload.version + 1;
-    const releaseReservation = async (): Promise<void> => {
-      await context.env.DB.prepare(`
+    const releaseReservation = async (): Promise<
+      "released" | "generation-changed" | "state-changed"
+    > => {
+      const released = await context.env.DB.prepare(`
         UPDATE media_uploads SET
           status = 'uploading', active_part = NULL, active_part_expires_at = NULL,
           version = version + 1, updated_at = ?4
         WHERE media_id = ?1 AND owner_subject = ?2
           AND version = ?3 AND status = 'part_uploading'
-          AND entry_generation_id = ?5
+          AND upload_id = ?6 AND entry_generation_id = ?5 AND active_part = ?7
+          AND EXISTS (
+            SELECT 1 FROM entries
+            WHERE entries.id = media_uploads.entry_id
+              AND entries.import_generation_id = ?5
+          )
       `).bind(
         mediaId,
         owner,
         reservationVersion,
         new Date().toISOString(),
         generation.data.generationId,
+        upload.upload_id,
+        partNumber,
       ).run();
+      if (released.meta.changes === 1) return "released";
+      if (!await entryGenerationIsCurrent(context.env.DB, entryId, generation.data.generationId)) {
+        return "generation-changed";
+      }
+      return "state-changed";
     };
 
     let part: R2UploadedPart;
@@ -1183,11 +1310,17 @@ importMediaUploadRoutes.put(
         .resumeMultipartUpload(upload.r2_key, upload.upload_id)
         .uploadPart(partNumber, body);
     } catch {
-      await releaseReservation();
+      const released = await releaseReservation();
+      if (released === "generation-changed") {
+        return apiError(context, 409, "ENTRY_IMPORT_GENERATION_CHANGED", "這篇日記已有更新的匯入工作，請重新開始。");
+      }
       return apiError(context, 500, "MEDIA_PART_UPLOAD_FAILED", "媒體分段上傳失敗，可以稍後重試。");
     }
     if (!ETAG_PATTERN.test(part.etag)) {
-      await releaseReservation();
+      const released = await releaseReservation();
+      if (released === "generation-changed") {
+        return apiError(context, 409, "ENTRY_IMPORT_GENERATION_CHANGED", "這篇日記已有更新的匯入工作，請重新開始。");
+      }
       return apiError(context, 500, "INVALID_MEDIA_PART_ETAG", "媒體分段驗證失敗，可以稍後重試。");
     }
 
@@ -1202,7 +1335,7 @@ importMediaUploadRoutes.put(
           FROM media_uploads
           WHERE media_id = ?1 AND owner_subject = ?5 AND version = ?7
             AND status = 'part_uploading' AND active_part = ?2
-            AND entry_generation_id = ?8
+            AND upload_id = ?9 AND entry_generation_id = ?8
             AND EXISTS (
               SELECT 1 FROM entries
               WHERE entries.id = media_uploads.entry_id
@@ -1221,6 +1354,7 @@ importMediaUploadRoutes.put(
           committedAt,
           reservationVersion,
           generation.data.generationId,
+          upload.upload_id,
         ),
         context.env.DB.prepare(`
           UPDATE media_uploads SET
@@ -1228,7 +1362,7 @@ importMediaUploadRoutes.put(
             active_part_expires_at = NULL, version = version + 1, updated_at = ?5
           WHERE media_id = ?1 AND owner_subject = ?2 AND version = ?3
             AND status = 'part_uploading' AND active_part = ?6
-            AND entry_generation_id = ?7
+            AND upload_id = ?8 AND entry_generation_id = ?7
             AND EXISTS (
               SELECT 1 FROM entries
               WHERE entries.id = media_uploads.entry_id
@@ -1242,14 +1376,21 @@ importMediaUploadRoutes.put(
           committedAt,
           partNumber,
           generation.data.generationId,
+          upload.upload_id,
         ),
       ]);
       if (results[0]?.meta.changes !== 1 || results[1]?.meta.changes !== 1) {
-        await releaseReservation();
+        const released = await releaseReservation();
+        if (released === "generation-changed") {
+          return apiError(context, 409, "ENTRY_IMPORT_GENERATION_CHANGED", "這篇日記已有更新的匯入工作，請重新開始。");
+        }
         return apiError(context, 409, "MEDIA_PART_STATE_CHANGED", "媒體分段狀態已更新，請重新續傳。");
       }
     } catch {
-      await releaseReservation();
+      const released = await releaseReservation();
+      if (released === "generation-changed") {
+        return apiError(context, 409, "ENTRY_IMPORT_GENERATION_CHANGED", "這篇日記已有更新的匯入工作，請重新開始。");
+      }
       return apiError(context, 500, "MEDIA_PART_COMMIT_FAILED", "媒體分段已收到，但狀態保存失敗，可以重試。");
     }
 
@@ -1294,6 +1435,9 @@ importMediaUploadRoutes.post(
     if (!media) return apiError(context, 404, "MEDIA_UPLOAD_NOT_FOUND", "找不到這個媒體上傳工作。");
 
     let storedObject = await context.env.MEDIA.head(upload.r2_key);
+    if (!await entryGenerationIsCurrent(context.env.DB, entryId, generation.data.generationId)) {
+      return apiError(context, 409, "ENTRY_IMPORT_GENERATION_CHANGED", "這篇日記已有更新的匯入工作，請重新開始。");
+    }
     if (upload.status === "completing") {
       if (storedObject?.size === upload.size_bytes) {
         const finalized = await finalizeUpload(
@@ -1302,10 +1446,13 @@ importMediaUploadRoutes.post(
           media.sha256,
           generation.data.generationId,
         );
-        if (finalized) {
+        if (finalized === "completed") {
           const response: ImportAppleJournalMediaResponse = { id: mediaId, disposition: "inserted" };
           noStore(context);
           return context.json(response);
+        }
+        if (finalized === "generation-changed") {
+          return apiError(context, 409, "ENTRY_IMPORT_GENERATION_CHANGED", "這篇日記已有更新的匯入工作，請重新開始。");
         }
       }
       const stateExpired =
@@ -1321,7 +1468,7 @@ importMediaUploadRoutes.post(
           version = version + 1, updated_at = ?4
         WHERE media_id = ?1 AND owner_subject = ?2 AND version = ?3
           AND status = 'completing' AND state_expires_at <= ?4
-          AND entry_generation_id = ?5
+          AND upload_id = ?6 AND entry_generation_id = ?5
           AND EXISTS (
             SELECT 1 FROM entries
             WHERE entries.id = media_uploads.entry_id
@@ -1333,8 +1480,12 @@ importMediaUploadRoutes.post(
         upload.version,
         releasedAt,
         generation.data.generationId,
+        upload.upload_id,
       ).run();
       if (released.meta.changes !== 1) {
+        if (!await entryGenerationIsCurrent(context.env.DB, entryId, generation.data.generationId)) {
+          return apiError(context, 409, "ENTRY_IMPORT_GENERATION_CHANGED", "這篇日記已有更新的匯入工作，請重新開始。");
+        }
         return apiError(context, 409, "MEDIA_UPLOAD_BUSY", "媒體正在完成上傳，請稍後重試。");
       }
       upload = {
@@ -1375,7 +1526,7 @@ importMediaUploadRoutes.post(
         version = version + 1, updated_at = ?5
       WHERE media_id = ?1 AND owner_subject = ?2 AND version = ?3
         AND status = 'uploading' AND next_part = ?4
-        AND entry_generation_id = ?7
+        AND upload_id = ?8 AND entry_generation_id = ?7
         AND EXISTS (
           SELECT 1 FROM entries
           WHERE entries.id = media_uploads.entry_id
@@ -1389,6 +1540,7 @@ importMediaUploadRoutes.post(
       reservedAt,
       stateExpiresAt,
       generation.data.generationId,
+      reservableUpload.upload_id,
     ).run();
     if (reserved.meta.changes !== 1) {
       upload = await uploadRowQuery(context.env.DB, mediaId);
@@ -1406,6 +1558,9 @@ importMediaUploadRoutes.post(
       }
       if (upload?.status === "completing") {
         storedObject = await context.env.MEDIA.head(upload.r2_key);
+        if (!await entryGenerationIsCurrent(context.env.DB, entryId, generation.data.generationId)) {
+          return apiError(context, 409, "ENTRY_IMPORT_GENERATION_CHANGED", "這篇日記已有更新的匯入工作，請重新開始。");
+        }
         if (storedObject?.size === upload.size_bytes) {
           const finalized = await finalizeUpload(
             context.env.DB,
@@ -1413,10 +1568,13 @@ importMediaUploadRoutes.post(
             media.sha256,
             generation.data.generationId,
           );
-          if (finalized) {
+          if (finalized === "completed") {
             const response: ImportAppleJournalMediaResponse = { id: mediaId, disposition: "inserted" };
             noStore(context);
             return context.json(response);
+          }
+          if (finalized === "generation-changed") {
+            return apiError(context, 409, "ENTRY_IMPORT_GENERATION_CHANGED", "這篇日記已有更新的匯入工作，請重新開始。");
           }
         }
       }
@@ -1439,7 +1597,6 @@ importMediaUploadRoutes.post(
             etag: part.etag,
           })));
         if (object.size !== upload.size_bytes) {
-          await context.env.MEDIA.delete(upload.r2_key);
           completedSizeMismatch = true;
           throw new Error("Completed multipart object has the wrong size");
         }
@@ -1451,14 +1608,21 @@ importMediaUploadRoutes.post(
 
     if (completedSizeMismatch) {
       const failedAt = new Date().toISOString();
-      await context.env.DB.batch([
+      const failedFence: UploadFence = {
+        uploadId: upload.upload_id,
+        generationId: generation.data.generationId,
+        version: upload.version + 1,
+        status: "failed",
+        requireCurrentGeneration: true,
+      };
+      const failed = await context.env.DB.batch([
         context.env.DB.prepare(`
           UPDATE media_uploads SET
             status = 'failed', state_expires_at = NULL,
             version = version + 1, updated_at = ?4
           WHERE media_id = ?1 AND owner_subject = ?2
             AND version = ?3 AND status = 'completing'
-            AND entry_generation_id = ?5
+            AND upload_id = ?6 AND entry_generation_id = ?5
             AND EXISTS (
               SELECT 1 FROM entries
               WHERE entries.id = media_uploads.entry_id
@@ -1470,13 +1634,27 @@ importMediaUploadRoutes.post(
           upload.version,
           failedAt,
           generation.data.generationId,
+          upload.upload_id,
         ),
         context.env.DB.prepare(`
           UPDATE media SET status = 'failed', updated_at = ?2
           WHERE id = ?1 AND EXISTS (
-            SELECT 1 FROM media_uploads WHERE media_id = ?1 AND status = 'failed'
+            SELECT 1 FROM media_uploads
+            WHERE media_id = ?1 AND upload_id = ?3
+              AND entry_generation_id = ?4 AND version = ?5 AND status = 'failed'
+              AND EXISTS (
+                SELECT 1 FROM entries
+                WHERE entries.id = media_uploads.entry_id
+                  AND entries.import_generation_id = ?4
+              )
           )
-        `).bind(mediaId, failedAt),
+        `).bind(
+          mediaId,
+          failedAt,
+          upload.upload_id,
+          generation.data.generationId,
+          failedFence.version,
+        ),
         importItemStatement(context.env.DB, {
           importId,
           sourcePath: upload.source_path,
@@ -1485,28 +1663,72 @@ importMediaUploadRoutes.post(
           status: "failed",
           errorCode: "MEDIA_SIZE_MISMATCH",
           requiredUploadStatus: "failed",
+          uploadFence: failedFence,
           now: failedAt,
         }),
+        context.env.DB.prepare(`
+          INSERT OR IGNORE INTO media_cleanup_queue (media_id, r2_key, requested_at)
+          SELECT media.id, media.r2_key, ?2
+          FROM media
+          WHERE media.id = ?1 AND media.status = 'failed'
+            AND EXISTS (
+              SELECT 1 FROM media_uploads
+              WHERE media_id = ?1 AND upload_id = ?3
+                AND entry_generation_id = ?4 AND version = ?5 AND status = 'failed'
+                AND EXISTS (
+                  SELECT 1 FROM entries
+                  WHERE entries.id = media_uploads.entry_id
+                    AND entries.import_generation_id = ?4
+                )
+            )
+        `).bind(
+          mediaId,
+          failedAt,
+          upload.upload_id,
+          generation.data.generationId,
+          failedFence.version,
+        ),
       ]);
+      if (failed[0]?.meta.changes !== 1) {
+        if (!await entryGenerationIsCurrent(context.env.DB, entryId, generation.data.generationId)) {
+          return apiError(context, 409, "ENTRY_IMPORT_GENERATION_CHANGED", "這篇日記已有更新的匯入工作，請重新開始。");
+        }
+        return apiError(context, 409, "MEDIA_UPLOAD_BUSY", "媒體正在由另一個請求處理。");
+      }
+      if (failed[1]?.meta.changes !== 1 || failed[2]?.meta.changes !== 1) {
+        return apiError(context, 500, "MEDIA_UPLOAD_FAILURE_COMMIT_FAILED", "媒體失敗狀態尚未完整保存，可以稍後重試。");
+      }
       return apiError(context, 500, "MEDIA_SIZE_MISMATCH", "媒體大小驗證失敗，請重新開始上傳。");
     }
 
     storedObject = await context.env.MEDIA.head(upload.r2_key);
     if (storedObject?.size !== upload.size_bytes) {
-      await context.env.DB.prepare(`
+      const released = await context.env.DB.prepare(`
         UPDATE media_uploads SET
           status = 'uploading', state_expires_at = NULL,
           version = version + 1, updated_at = ?4
         WHERE media_id = ?1 AND owner_subject = ?2
           AND version = ?3 AND status = 'completing'
-          AND entry_generation_id = ?5
+          AND upload_id = ?6 AND entry_generation_id = ?5
+          AND EXISTS (
+            SELECT 1 FROM entries
+            WHERE entries.id = media_uploads.entry_id
+              AND entries.import_generation_id = ?5
+          )
       `).bind(
         mediaId,
         owner,
         upload.version,
         new Date().toISOString(),
         generation.data.generationId,
+        upload.upload_id,
       ).run();
+      if (
+        released.meta.changes !== 1 &&
+        !await entryGenerationIsCurrent(context.env.DB, entryId, generation.data.generationId)
+      ) {
+        return apiError(context, 409, "ENTRY_IMPORT_GENERATION_CHANGED", "這篇日記已有更新的匯入工作，請重新開始。");
+      }
       return apiError(context, 500, "MEDIA_UPLOAD_COMPLETE_FAILED", "媒體完成上傳失敗，可以稍後重試。");
     }
 
@@ -1516,7 +1738,10 @@ importMediaUploadRoutes.post(
       media.sha256,
       generation.data.generationId,
     );
-    if (!finalized) {
+    if (finalized === "generation-changed") {
+      return apiError(context, 409, "ENTRY_IMPORT_GENERATION_CHANGED", "這篇日記已有更新的匯入工作，請重新開始。");
+    }
+    if (finalized !== "completed") {
       return apiError(context, 500, "MEDIA_UPLOAD_FINALIZE_FAILED", "媒體已上傳，狀態尚未完成，可以重試。");
     }
     const response: ImportAppleJournalMediaResponse = { id: mediaId, disposition: "inserted" };
@@ -1569,7 +1794,7 @@ importMediaUploadRoutes.post(
         status = 'aborting', active_part = NULL, active_part_expires_at = NULL,
         state_expires_at = ?5, version = version + 1, updated_at = ?4
       WHERE media_id = ?1 AND owner_subject = ?2 AND version = ?3
-        AND entry_generation_id = ?6
+        AND upload_id = ?7 AND entry_generation_id = ?6
         AND EXISTS (
           SELECT 1 FROM entries
           WHERE entries.id = media_uploads.entry_id
@@ -1587,6 +1812,7 @@ importMediaUploadRoutes.post(
       claimedAt,
       stateExpiresAt,
       generation.data.generationId,
+      upload.upload_id,
     ).run();
     if (claimed.meta.changes !== 1) {
       const current = await uploadRowQuery(context.env.DB, mediaId);
@@ -1613,6 +1839,9 @@ importMediaUploadRoutes.post(
       .bind(mediaId)
       .first<{ sha256: string }>();
     const completedObject = await context.env.MEDIA.head(upload.r2_key);
+    if (!await entryGenerationIsCurrent(context.env.DB, entryId, generation.data.generationId)) {
+      return apiError(context, 409, "ENTRY_IMPORT_GENERATION_CHANGED", "這篇日記已有更新的匯入工作，請重新開始。");
+    }
     if (media && completedObject?.size === upload.size_bytes) {
       const completingAt = new Date().toISOString();
       const completingExpiresAt = new Date(Date.now() + UPLOAD_STATE_LEASE_MS).toISOString();
@@ -1622,7 +1851,7 @@ importMediaUploadRoutes.post(
           version = version + 1, updated_at = ?4
         WHERE media_id = ?1 AND owner_subject = ?2
           AND version = ?3 AND status = 'aborting'
-          AND entry_generation_id = ?6
+          AND upload_id = ?7 AND entry_generation_id = ?6
           AND EXISTS (
             SELECT 1 FROM entries
             WHERE entries.id = media_uploads.entry_id
@@ -1635,46 +1864,83 @@ importMediaUploadRoutes.post(
         completingAt,
         completingExpiresAt,
         generation.data.generationId,
+        upload.upload_id,
       ).run();
-      if (recovered.meta.changes === 1) {
-        await finalizeUpload(
-          context.env.DB,
-          {
-            ...upload,
-            status: "completing",
-            state_expires_at: completingExpiresAt,
-            version: abortVersion + 1,
-          },
-          media.sha256,
-          generation.data.generationId,
-        );
+      if (recovered.meta.changes !== 1) {
+        if (!await entryGenerationIsCurrent(context.env.DB, entryId, generation.data.generationId)) {
+          return apiError(context, 409, "ENTRY_IMPORT_GENERATION_CHANGED", "這篇日記已有更新的匯入工作，請重新開始。");
+        }
+        return apiError(context, 409, "MEDIA_UPLOAD_BUSY", "媒體正在由另一個請求處理。");
+      }
+      const finalized = await finalizeUpload(
+        context.env.DB,
+        {
+          ...upload,
+          status: "completing",
+          state_expires_at: completingExpiresAt,
+          version: abortVersion + 1,
+        },
+        media.sha256,
+        generation.data.generationId,
+      );
+      if (finalized === "generation-changed") {
+        return apiError(context, 409, "ENTRY_IMPORT_GENERATION_CHANGED", "這篇日記已有更新的匯入工作，請重新開始。");
+      }
+      if (finalized !== "completed") {
+        return apiError(context, 409, "MEDIA_UPLOAD_BUSY", "媒體正在由另一個請求處理。");
       }
       noStore(context);
       return context.body(null, 204);
     }
 
     const now = new Date().toISOString();
-    await context.env.DB.batch([
+    const abortedFence: UploadFence = {
+      uploadId: upload.upload_id,
+      generationId: generation.data.generationId,
+      version: abortVersion + 1,
+      status: "aborted",
+      requireCurrentGeneration: true,
+    };
+    const terminal = await context.env.DB.batch([
       context.env.DB.prepare(`
         UPDATE media_uploads SET
           status = 'aborted', state_expires_at = NULL,
           version = version + 1, updated_at = ?4
         WHERE media_id = ?1 AND owner_subject = ?2
           AND version = ?3 AND status = 'aborting'
-          AND entry_generation_id = ?5
+          AND upload_id = ?6 AND entry_generation_id = ?5
+          AND EXISTS (
+            SELECT 1 FROM entries
+            WHERE entries.id = media_uploads.entry_id
+              AND entries.import_generation_id = ?5
+          )
       `).bind(
         mediaId,
         owner,
         abortVersion,
         now,
         generation.data.generationId,
+        upload.upload_id,
       ),
       context.env.DB.prepare(`
         UPDATE media SET status = 'failed', updated_at = ?2
         WHERE id = ?1 AND EXISTS (
-          SELECT 1 FROM media_uploads WHERE media_id = ?1 AND status = 'aborted'
+          SELECT 1 FROM media_uploads
+          WHERE media_id = ?1 AND upload_id = ?3
+            AND entry_generation_id = ?4 AND version = ?5 AND status = 'aborted'
+            AND EXISTS (
+              SELECT 1 FROM entries
+              WHERE entries.id = media_uploads.entry_id
+                AND entries.import_generation_id = ?4
+            )
         )
-      `).bind(mediaId, now),
+      `).bind(
+        mediaId,
+        now,
+        upload.upload_id,
+        generation.data.generationId,
+        abortedFence.version,
+      ),
       importItemStatement(context.env.DB, {
         importId,
         sourcePath: upload.source_path,
@@ -1683,6 +1949,7 @@ importMediaUploadRoutes.post(
         status: "failed",
         errorCode: "UPLOAD_ABORTED",
         requiredUploadStatus: "aborted",
+        uploadFence: abortedFence,
         now,
       }),
       ...reconcileImportedEntryStatements(
@@ -1692,6 +1959,15 @@ importMediaUploadRoutes.post(
         now,
       ),
     ]);
+    if (terminal[0]?.meta.changes !== 1) {
+      if (!await entryGenerationIsCurrent(context.env.DB, entryId, generation.data.generationId)) {
+        return apiError(context, 409, "ENTRY_IMPORT_GENERATION_CHANGED", "這篇日記已有更新的匯入工作，請重新開始。");
+      }
+      return apiError(context, 409, "MEDIA_UPLOAD_BUSY", "媒體正在由另一個請求處理。");
+    }
+    if (terminal[1]?.meta.changes !== 1 || terminal[2]?.meta.changes !== 1) {
+      return apiError(context, 500, "MEDIA_UPLOAD_ABORT_COMMIT_FAILED", "媒體取消狀態尚未完整保存，可以稍後重試。");
+    }
     noStore(context);
     return context.body(null, 204);
   },

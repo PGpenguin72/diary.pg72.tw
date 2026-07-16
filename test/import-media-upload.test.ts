@@ -1,4 +1,5 @@
 import { env, exports } from "cloudflare:workers";
+import { createExecutionContext } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type {
   StartAppleJournalMediaUploadInput,
@@ -15,6 +16,7 @@ import {
   cleanupExpiredMediaUploads,
   cleanupQueuedMedia,
 } from "../worker/routes/import-media-uploads";
+import workerHandler from "../worker/index";
 
 const worker = exports.default;
 const PNG_BYTES = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
@@ -30,6 +32,17 @@ interface UploadStateRow {
   version: number;
   next_part: number;
   active_part: number | null;
+  active_part_expires_at: string | null;
+  state_expires_at: string | null;
+  updated_at: string;
+}
+
+type DeferredMultipartAction = "part" | "complete" | "complete-failure" | "abort";
+
+interface DeferredMultipartGate {
+  bucket: R2Bucket;
+  reached: Promise<void>;
+  release(): void;
 }
 
 function fingerprint(seed: number): string {
@@ -101,6 +114,92 @@ function withGeneration(url: string, generationId: string): string {
   return `${url}?generationId=${encodeURIComponent(generationId)}`;
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve(value: T | PromiseLike<T>): void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+function deferredMultipartGate(action: DeferredMultipartAction): DeferredMultipartGate {
+  const reached = deferred<void>();
+  const released = deferred<void>();
+  let intercepted = false;
+
+  async function pauseAfter<T>(operation: () => Promise<T>): Promise<T> {
+    const result = await operation();
+    reached.resolve();
+    await released.promise;
+    return result;
+  }
+
+  async function pauseBeforeFailure<T>(): Promise<T> {
+    reached.resolve();
+    await released.promise;
+    throw new Error("Synthetic deferred R2 failure");
+  }
+
+  const bucket: R2Bucket = {
+    head: env.MEDIA.head.bind(env.MEDIA),
+    get: env.MEDIA.get.bind(env.MEDIA),
+    put: env.MEDIA.put.bind(env.MEDIA),
+    createMultipartUpload: env.MEDIA.createMultipartUpload.bind(env.MEDIA),
+    resumeMultipartUpload(key: string, uploadId: string): R2MultipartUpload {
+      const multipart = env.MEDIA.resumeMultipartUpload(key, uploadId);
+      return {
+        key: multipart.key,
+        uploadId: multipart.uploadId,
+        uploadPart(...args: Parameters<R2MultipartUpload["uploadPart"]>) {
+          if (action !== "part" || intercepted) return multipart.uploadPart(...args);
+          intercepted = true;
+          return pauseAfter(() => multipart.uploadPart(...args));
+        },
+        complete(...args: Parameters<R2MultipartUpload["complete"]>) {
+          if ((action !== "complete" && action !== "complete-failure") || intercepted) {
+            return multipart.complete(...args);
+          }
+          intercepted = true;
+          if (action === "complete-failure") return pauseBeforeFailure();
+          return pauseAfter(() => multipart.complete(...args));
+        },
+        abort() {
+          if (action !== "abort" || intercepted) return multipart.abort();
+          intercepted = true;
+          return pauseAfter(() => multipart.abort());
+        },
+      };
+    },
+    delete: env.MEDIA.delete.bind(env.MEDIA),
+    list: env.MEDIA.list.bind(env.MEDIA),
+  };
+
+  return {
+    bucket,
+    reached: reached.promise,
+    release: () => released.resolve(),
+  };
+}
+
+function fetchWithMedia(request: Request, bucket: R2Bucket): Promise<Response> {
+  const testEnv: Env = {
+    MEDIA: bucket,
+    DB: env.DB,
+    ASSETS: env.ASSETS,
+    AUTH_ISSUER: env.AUTH_ISSUER,
+    AUTH_CLIENT_ID: env.AUTH_CLIENT_ID,
+    AUTH_ALLOWED_SUBJECT: env.AUTH_ALLOWED_SUBJECT,
+  };
+  return Promise.resolve(workerHandler.fetch(
+    request as Parameters<typeof workerHandler.fetch>[0],
+    testEnv,
+    createExecutionContext(),
+  ));
+}
+
 async function startMediaUpload(
   baseUrl: string,
   input: StartAppleJournalMediaUploadInput,
@@ -158,11 +257,97 @@ function readUploadState(mediaId: string): Promise<UploadStateRow | null> {
   return env.DB.prepare(`
     SELECT media_uploads.upload_id, media.r2_key, media_uploads.status,
       media_uploads.entry_generation_id, media_uploads.version,
-      media_uploads.next_part, media_uploads.active_part
+      media_uploads.next_part, media_uploads.active_part,
+      media_uploads.active_part_expires_at, media_uploads.state_expires_at,
+      media_uploads.updated_at
     FROM media_uploads
     JOIN media ON media.id = media_uploads.media_id
     WHERE media_uploads.media_id = ?1
   `).bind(mediaId).first<UploadStateRow>();
+}
+
+async function replaceClaimedUpload(
+  mediaId: string,
+  generationId: string,
+  mimeType: string,
+): Promise<UploadStateRow> {
+  const claimed = await readUploadState(mediaId);
+  if (!claimed) throw new Error("Expected a claimed upload");
+  const replacement = await env.MEDIA.createMultipartUpload(claimed.r2_key, {
+    httpMetadata: { contentType: mimeType },
+  });
+  const now = new Date().toISOString();
+  const [replaced, , media] = await env.DB.batch([
+    env.DB.prepare(`
+      UPDATE media_uploads SET
+        entry_generation_id = ?4, upload_id = ?5, status = 'uploading',
+        next_part = 1, active_part = NULL, active_part_expires_at = NULL,
+        state_expires_at = NULL, updated_at = ?6
+      WHERE media_id = ?1 AND upload_id = ?2 AND version = ?3
+    `).bind(
+      mediaId,
+      claimed.upload_id,
+      claimed.version,
+      generationId,
+      replacement.uploadId,
+      now,
+    ),
+    env.DB.prepare(`DELETE FROM media_upload_parts WHERE media_id = ?1`).bind(mediaId),
+    env.DB.prepare(`
+      UPDATE media SET status = 'uploading', updated_at = ?2 WHERE id = ?1
+    `).bind(mediaId, now),
+  ]);
+  expect(replaced.meta.changes).toBe(1);
+  expect(media.meta.changes).toBe(1);
+  const current = await readUploadState(mediaId);
+  if (!current) throw new Error("Expected a replacement upload");
+  expect(current).toMatchObject({
+    upload_id: replacement.uploadId,
+    entry_generation_id: generationId,
+    status: "uploading",
+    version: claimed.version,
+    next_part: 1,
+    active_part: null,
+    active_part_expires_at: null,
+    state_expires_at: null,
+  });
+  return current;
+}
+
+async function readRaceState(mediaId: string, importId: string, sourcePath: string) {
+  const [upload, media, parts, item] = await Promise.all([
+    readUploadState(mediaId),
+    env.DB.prepare(`
+      SELECT status, updated_at FROM media WHERE id = ?1
+    `).bind(mediaId).first<{ status: string; updated_at: string }>(),
+    env.DB.prepare(`
+      SELECT part_number, etag, size_bytes, updated_at
+      FROM media_upload_parts WHERE media_id = ?1 ORDER BY part_number
+    `).bind(mediaId).all<{
+      part_number: number;
+      etag: string;
+      size_bytes: number;
+      updated_at: string;
+    }>(),
+    env.DB.prepare(`
+      SELECT source_id, checksum, status, error_code, updated_at
+      FROM import_items WHERE import_id = ?1 AND source_path = ?2
+    `).bind(importId, sourcePath).first<{
+      source_id: string | null;
+      checksum: string | null;
+      status: string;
+      error_code: string | null;
+      updated_at: string;
+    }>(),
+  ]);
+  return { upload, media, parts: parts.results, item };
+}
+
+async function readObjectState(key: string) {
+  const object = await env.MEDIA.head(key);
+  return object
+    ? { size: object.size, etag: object.etag, version: object.version }
+    : null;
 }
 
 describe("Apple Journal multipart media uploads", () => {
@@ -725,6 +910,110 @@ describe("Apple Journal multipart media uploads", () => {
     ).toBe(200);
   });
 
+  it.each([
+    { action: "part" as const, seed: 131, claimedStatus: "part_uploading" },
+    { action: "complete" as const, seed: 132, claimedStatus: "completing" },
+    { action: "complete-failure" as const, seed: 133, claimedStatus: "completing" },
+    { action: "abort" as const, seed: 134, claimedStatus: "aborting" },
+  ])("fences a deferred post-R2 $action transition from generation replacement", async ({
+    action,
+    seed,
+    claimedStatus,
+  }) => {
+    const { importId, entryId, generationId: staleGenerationId } =
+      await createImportAndEntry(seed);
+    const base = uploadBase(importId, entryId);
+    const input = mediaInput(seed + 3_000, PNG_BYTES, staleGenerationId);
+    const started = await startMediaUpload(base, input);
+    if (started.payload.disposition !== "uploading") throw new Error("Expected an upload session");
+    const uploadUrl = `${base}/${started.payload.id}`;
+    if (action === "complete" || action === "complete-failure") {
+      expect((await putPart(
+        withGeneration(`${uploadUrl}/parts/1`, staleGenerationId),
+        PNG_BYTES,
+        input.mimeType,
+      )).status).toBe(201);
+    }
+
+    const gate = deferredMultipartGate(action);
+    const request = action === "part"
+      ? new Request(withGeneration(`${uploadUrl}/parts/1`, staleGenerationId), {
+          method: "PUT",
+          headers: {
+            "Content-Type": input.mimeType,
+            "X-Media-Size": String(PNG_BYTES.byteLength),
+          },
+          body: PNG_BYTES,
+        })
+      : new Request(
+          withGeneration(
+            `${uploadUrl}/${action === "complete-failure" ? "complete" : action}`,
+            staleGenerationId,
+          ),
+          { method: "POST" },
+        );
+    const pendingResponse = fetchWithMedia(request, gate.bucket);
+    await gate.reached;
+
+    let setupError: unknown;
+    let currentGenerationId = "";
+    let replacementState: Awaited<ReturnType<typeof readRaceState>> | null = null;
+    let replacementObject: Awaited<ReturnType<typeof readObjectState>> = null;
+    try {
+      expect(await readUploadState(started.payload.id)).toMatchObject({
+        entry_generation_id: staleGenerationId,
+        status: claimedStatus,
+      });
+      currentGenerationId = await retryImportEntry(importId, seed);
+      expect(currentGenerationId).not.toBe(staleGenerationId);
+      const replacement = await replaceClaimedUpload(
+        started.payload.id,
+        currentGenerationId,
+        input.mimeType,
+      );
+      replacementState = await readRaceState(started.payload.id, importId, input.sourcePath);
+      replacementObject = await readObjectState(replacement.r2_key);
+    } catch (error) {
+      setupError = error;
+    } finally {
+      gate.release();
+    }
+
+    const staleResponse = await pendingResponse;
+    if (setupError instanceof Error) throw setupError;
+    if (setupError !== undefined) {
+      throw new Error("Deferred R2 race setup failed", { cause: setupError });
+    }
+    expect(staleResponse.status).toBe(409);
+    expect(await staleResponse.json()).toMatchObject({
+      error: { code: "ENTRY_IMPORT_GENERATION_CHANGED" },
+    });
+    expect(await readRaceState(started.payload.id, importId, input.sourcePath))
+      .toEqual(replacementState);
+    const current = await readUploadState(started.payload.id);
+    if (!current) throw new Error("Expected the replacement upload to remain active");
+    expect(await readObjectState(current.r2_key)).toEqual(replacementObject);
+
+    expect((await putPart(
+      withGeneration(`${uploadUrl}/parts/1`, currentGenerationId),
+      PNG_BYTES,
+      input.mimeType,
+    )).status).toBe(201);
+    expect((await worker.fetch(new Request(
+      withGeneration(`${uploadUrl}/complete`, currentGenerationId),
+      { method: "POST" },
+    ))).status).toBe(201);
+    expect(await readUploadState(started.payload.id)).toMatchObject({
+      upload_id: current.upload_id,
+      entry_generation_id: currentGenerationId,
+      status: "completed",
+    });
+    expect((await env.MEDIA.head(current.r2_key))?.size).toBe(PNG_BYTES.byteLength);
+    expect(
+      (await worker.fetch(new Request(`http://localhost/api/entries/${entryId}`))).status,
+    ).toBe(200);
+  });
+
   it("cleanup reconciles an R2 completion left behind before its D1 commit", async () => {
     const { importId, entryId, generationId } = await createImportAndEntry(114);
     const base = uploadBase(importId, entryId);
@@ -872,12 +1161,53 @@ describe("Apple Journal multipart media uploads", () => {
       `).bind(mediaId, r2Key, now),
     ]);
 
-    expect(await cleanupQueuedMedia(env)).toMatchObject({ referenced: 1, deleted: 0, failed: 0 });
+    expect(await cleanupQueuedMedia(env)).toMatchObject({ referenced: 1, failed: 0 });
     expect(await env.DB.prepare(`SELECT id FROM media WHERE id = ?1`).bind(mediaId).first()).not.toBeNull();
     expect(await env.MEDIA.head(r2Key)).not.toBeNull();
     expect(
       await env.DB.prepare(`SELECT media_id FROM media_cleanup_queue WHERE media_id = ?1`)
         .bind(mediaId)
+        .first(),
+    ).toBeNull();
+  });
+
+  it("durably removes an unreferenced object from a failed upload", async () => {
+    const { importId, entryId, generationId } = await createImportAndEntry(135);
+    const base = uploadBase(importId, entryId);
+    const input = mediaInput(3_135, PNG_BYTES, generationId);
+    const started = await startMediaUpload(base, input);
+    if (started.payload.disposition !== "uploading") throw new Error("Expected an upload session");
+    const upload = await readUploadState(started.payload.id);
+    if (!upload) throw new Error("Expected upload state");
+    await env.MEDIA.resumeMultipartUpload(upload.r2_key, upload.upload_id).abort();
+    await env.MEDIA.put(upload.r2_key, PNG_BYTES, {
+      httpMetadata: { contentType: input.mimeType },
+    });
+    const now = new Date().toISOString();
+    await env.DB.batch([
+      env.DB.prepare(`
+        UPDATE media_uploads SET status = 'failed', version = version + 1, updated_at = ?2
+        WHERE media_id = ?1 AND status = 'uploading'
+      `).bind(started.payload.id, now),
+      env.DB.prepare(`
+        UPDATE media SET status = 'failed', updated_at = ?2 WHERE id = ?1
+      `).bind(started.payload.id, now),
+      env.DB.prepare(`
+        INSERT OR REPLACE INTO media_cleanup_queue (media_id, r2_key, requested_at)
+        VALUES (?1, ?2, ?3)
+      `).bind(started.payload.id, upload.r2_key, now),
+    ]);
+
+    expect(await cleanupQueuedMedia(env)).toMatchObject({ failed: 0 });
+    expect(
+      await env.DB.prepare(`SELECT id FROM media WHERE id = ?1`)
+        .bind(started.payload.id)
+        .first(),
+    ).toBeNull();
+    expect(await env.MEDIA.head(upload.r2_key)).toBeNull();
+    expect(
+      await env.DB.prepare(`SELECT media_id FROM media_cleanup_queue WHERE media_id = ?1`)
+        .bind(started.payload.id)
         .first(),
     ).toBeNull();
   });

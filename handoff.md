@@ -85,8 +85,8 @@
 - entry 逐篇 D1 upsert；zip.js 以 backpressure 串流解壓、瀏覽器只保留目前的 8 MiB part，再由 Worker 的 owner-bound R2 multipart session 寫入 private R2。
 - 依 archive fingerprint、source path、canonical content hash 與媒體 fingerprint 去重；同一 ZIP 可重新選取並安全重跑。
 - D1 `media_uploads` / `media_upload_parts` 保存 upload session、part 順序與 opaque ETag；每段重試三次，中斷後可續傳，取消會 abort，failed row 可恢復而不再假裝成 duplicate。
-- part/complete/abort 都攜帶 generation，並在 D1 reservation / commit 同時比對 upload row 與 entry current generation；stale action 回 409，不能碰 replacement upload。各動作再以 version、next part 與短 lease 做 CAS；hard crash 可重寫同一 part，R2 已 complete 但 D1 未 finalize 時可由 object head reconciliation。每次 entry attempt 都有 generation ID；零附件 entry 在建立 batch 內立即 publish，舊 ready link 不能滿足新 expected count，含附件 entry 在 current generation 全部 ready 前維持非公開 `partial-import`。
-- 每日 scheduled cleanup 分批回收過期 session，保護 active lease、先修復 R2-success / D1-pending，再 abort；terminal bookkeeping 保留 7 天。新 generation publish 後 stale link 會進 durable cleanup queue；只有 D1 零引用的 media 才先刪 row、再冪等刪 R2，共用媒體不刪。
+- part/complete/abort 都攜帶 generation，並在 D1 reservation / commit 同時比對 upload ID、upload row generation/version/state 與 entry current generation；每個 R2 await 後的 commit、failure release 與 terminal transition 都檢查 `meta.changes`，期間切換 generation 固定回 409，不能碰 replacement upload 或寫入成功報告。各動作再以 version、next part 與短 lease 做 CAS；hard crash 可重寫同一 part，R2 已 complete 但 D1 未 finalize 時可由 object head reconciliation。每次 entry attempt 都有 generation ID；零附件 entry 在建立 batch 內立即 publish，舊 ready link 不能滿足新 expected count，含附件 entry 在 current generation 全部 ready 前維持非公開 `partial-import`。
+- 每日 scheduled cleanup 分批回收過期 session，保護 active lease、先修復 R2-success / D1-pending，再 abort；terminal bookkeeping 保留 7 天。新 generation publish 後的 stale link，以及 exact current-generation completion 所留下的錯誤大小 object，會進 durable cleanup queue；只有 D1 零引用且沒有 active upload 的 media 才先刪 row、再冪等刪 R2，共用媒體與 replacement upload 不刪。
 - import job 與 import item 會記錄進度；UI 顯示整體 item 與目前檔案 byte/part 進度。entry 建立失敗會把每個未嘗試附件逐項記為 skipped；JSON report 保留完整 bounded source path / fingerprint reconciliation identity，並允許重跑同一 ZIP。
 - parser 對單次 preview 設 10,000 entries、50,000 reconciliation items、32 MiB HTML 與 32 MiB retained text 上限；單一路徑 1,024 bytes、path metadata 合計 8 MiB，central-directory fingerprint 只取 bounded path。損壞 ZIP 和不安全/過長路徑有 desktop/mobile regression。
 
@@ -183,7 +183,7 @@ Rollback 邊界：
 
 - Migration 前可回滾舊 Worker，因為 schema 尚未改；不要讓新舊 Worker 同時接受 upload。
 - `0006` 後不可只回滾到舊 Worker：舊程式不會寫 generation state，與新 schema 不相容。失敗時保持 mutation 關閉，優先 forward-fix；若必須回復，使用 migration 前 D1 checkpoint，並核對同一時間點的 R2 狀態。
-- `media_cleanup_queue` 只在新 generation 成功 publish 後才有資料。production smoke 完成前不要手動觸發 cleanup；Cron 由 `wrangler.jsonc` 的 `17 3 * * *` 隨 Worker deployment 管理，變更可能延遲生效。第一次 Cron 後檢查 `media_upload_cleanup_completed` 的 upload/media result 與 queue backlog，不記錄 filename 或內容。
+- `media_cleanup_queue` 由新 generation 成功 publish 的 stale link 或 exact failed size transition 寫入。production smoke 完成前不要手動觸發 cleanup；Cron 由 `wrangler.jsonc` 的 `17 3 * * *` 隨 Worker deployment 管理，變更可能延遲生效。第一次 Cron 後檢查 `media_upload_cleanup_completed` 的 upload/media result 與 queue backlog，不記錄 filename 或內容。
 - Push 到連接 Workers Builds 的 deployment branch 可能直接 build/deploy 並更新 Cron。Production 仍為 NO-GO 時，不得以「只 push code」假設不會改變遠端狀態。
 
 ## 尚未完成或仍有風險
@@ -233,7 +233,7 @@ pnpm build
 目前測試入口：
 
 - `test/streaks.test.ts`：日期與 streak 統計。
-- `test/worker.test.ts` / `test/import-media-upload.test.ts`：migration、API、generation-scoped 匯入、stale multipart rejection、D1/R2、dedupe、CAS crash recovery、cleanup 與虛擬大檔 geometry；目前完整 Vitest 為 71 tests。
+- `test/worker.test.ts` / `test/import-media-upload.test.ts`：migration、API、generation-scoped 匯入、initial 與 deferred post-R2 stale multipart rejection、D1/R2、dedupe、CAS crash recovery、cleanup 與虛擬大檔 geometry；目前完整 Vitest 為 76 tests。
 - `e2e/diary.spec.ts`：desktop/mobile overview、malformed/overlong-path/valid-preview/partial-failure/entry-skipped import、逐檔進度、composer、Apple import/re-import、Markdown、自然比例 media masonry、lightbox、卡片無媒體，以及有序 timeline masonry；目前為 9 Playwright cases。
 - `.github/workflows/ci.yml`：check、Workers tests、Playwright Chromium 與 production build。
 
