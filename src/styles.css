@@ -2,27 +2,56 @@
   font-family:
     Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
     "Noto Sans TC", sans-serif;
-  color: #f2f4f7;
-  background: #080a0d;
+  color: #ededef;
+  background: #050506;
   color-scheme: dark;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   letter-spacing: 0;
-  --paper: #0d1014;
-  --surface: #13171c;
-  --surface-raised: #181d23;
-  --wash: #080a0d;
-  --ink: #f2f4f7;
-  --ink-soft: #969da8;
-  --line: #242932;
-  --line-strong: #363d48;
-  --forest: #c8f169;
-  --forest-dark: #a9d34f;
+
+  /* morden_dark — deep space with ambient light.
+     Near-black bases (#050506, never pure black) + single indigo accent.
+     Surfaces/borders are translucent white so ambient light reads through. */
+  --wash: #050506; /* primary page canvas */
+  --paper: #0a0a0c; /* elevated opaque surfaces: headers, dialogs */
+  --surface: rgba(255, 255, 255, 0.04); /* cards, containers */
+  --surface-raised: rgba(255, 255, 255, 0.06); /* hovered / raised */
+  --charcoal: #08080a; /* deepest chrome: sidebar */
+  --ink: #ededef; /* primary text — bright, not pure white */
+  --ink-soft: #8a8f98; /* body, metadata */
+  --line: rgba(255, 255, 255, 0.07); /* hairline borders */
+  --line-strong: rgba(255, 255, 255, 0.12); /* emphasised borders */
+
+  /* accent — variable names kept to minimise diff; values now indigo */
+  --forest: #5e6ad2; /* primary interactive / accent */
+  --forest-dark: #6872d9; /* accent-bright — hover */
+  --accent: #5e6ad2;
+  --accent-bright: #6872d9;
+  --accent-glow: rgba(94, 106, 210, 0.3);
+
+  /* retained semantic colours (danger / link / highlight) */
   --coral: #ff8e72;
-  --sky: #75c7f0;
+  --sky: #8b93e8;
   --gold: #e7c269;
-  --charcoal: #0b0e12;
+
   --serif: "Iowan Old Style", "Palatino Linotype", "Noto Serif TC", serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  /* radius scale — 16px containers/cards, 8px controls */
+  --radius-lg: 16px;
+  --radius-md: 12px;
+  --radius-sm: 8px;
+
+  /* motion — expo-out, tiny precise movements */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* multi-layer shadows: border highlight + soft diffuse + ambient + glow */
+  --shadow-card: 0 0 0 1px rgba(255, 255, 255, 0.06),
+    0 2px 20px rgba(0, 0, 0, 0.4), 0 0 40px rgba(0, 0, 0, 0.2);
+  --shadow-card-hover: 0 0 0 1px rgba(255, 255, 255, 0.1),
+    0 8px 40px rgba(0, 0, 0, 0.5), 0 0 80px rgba(94, 106, 210, 0.12);
+  --shadow-accent: 0 0 0 1px rgba(94, 106, 210, 0.5),
+    0 4px 12px rgba(94, 106, 210, 0.3), inset 0 1px 0 0 rgba(255, 255, 255, 0.2);
 }
 
 * {
@@ -33,7 +62,16 @@
 html {
   min-width: 320px;
   min-height: 100%;
-  background: var(--wash);
+  /* Layered base gradient — radial depth from top, deepest at the bottom */
+  background:
+    radial-gradient(
+      ellipse at top,
+      #0a0a0f 0%,
+      #050506 50%,
+      #020203 100%
+    )
+    var(--wash);
+  background-attachment: fixed;
 }
 
 body,
@@ -45,6 +83,60 @@ body,
 body {
   min-width: 320px;
   overflow-x: hidden;
+  background: transparent;
+}
+
+/* Ambient light pools — heavily blurred indigo blobs floating behind content.
+   position: fixed + z-index: -1 keeps them under all app chrome; the
+   translucent surfaces let the light read through. pointer-events: none so
+   they never intercept input. prefers-reduced-motion (below) freezes the drift. */
+body::before,
+body::after {
+  content: "";
+  position: fixed;
+  z-index: -1;
+  pointer-events: none;
+  border-radius: 50%;
+  filter: blur(150px);
+  will-change: transform;
+}
+
+body::before {
+  top: -22vh;
+  left: 50%;
+  width: 900px;
+  height: 700px;
+  margin-left: -450px;
+  background: radial-gradient(
+    closest-side,
+    rgba(94, 106, 210, 0.28),
+    transparent
+  );
+  animation: ambient-float 9s ease-in-out infinite;
+}
+
+body::after {
+  right: -8vw;
+  bottom: -12vh;
+  width: 620px;
+  height: 620px;
+  filter: blur(130px);
+  background: radial-gradient(
+    closest-side,
+    rgba(139, 147, 232, 0.16),
+    transparent
+  );
+  animation: ambient-float 11s ease-in-out infinite reverse;
+}
+
+@keyframes ambient-float {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-20px) rotate(1deg);
+  }
 }
 
 button,
@@ -71,7 +163,7 @@ a:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
 select:focus-visible {
-  outline: 3px solid rgba(200, 241, 105, 0.24);
+  outline: 3px solid rgba(94, 106, 210, 0.24);
   outline-offset: 2px;
 }
 
@@ -132,11 +224,12 @@ img {
   flex: 0 0 38px;
   width: 38px;
   height: 38px;
-  color: #0a0c0f;
+  color: #ffffff;
   font-family: var(--serif);
   font-size: 24px;
   background: var(--forest);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-accent);
 }
 
 .brand > span:last-child {
@@ -194,17 +287,24 @@ img {
   content: "";
   background: var(--forest);
   border-radius: 0 2px 2px 0;
-  transition: height 160ms ease;
+  box-shadow: 0 0 12px var(--accent-glow);
+  transition: height 220ms var(--ease-out);
+}
+
+.nav-item {
+  transition:
+    color 200ms var(--ease-out),
+    background-color 200ms var(--ease-out);
 }
 
 .nav-item:hover {
   color: #ffffff;
-  background: #151a20;
+  background: var(--surface);
 }
 
 .nav-item[data-active="true"] {
   color: #ffffff;
-  background: #1b2027;
+  background: var(--surface-raised);
 }
 
 .nav-item[data-active="true"]::before {
@@ -269,8 +369,10 @@ img {
 .dialog-header > div > span {
   display: block;
   color: var(--forest);
+  font-family: var(--mono);
   font-size: 10px;
-  font-weight: 800;
+  font-weight: 600;
+  letter-spacing: 0.18em;
   text-transform: uppercase;
 }
 
@@ -305,17 +407,22 @@ img {
   font-weight: 700;
   white-space: nowrap;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
   transition:
-    background-color 150ms ease,
-    border-color 150ms ease,
-    color 150ms ease,
-    transform 150ms ease;
+    background-color 200ms var(--ease-out),
+    border-color 200ms var(--ease-out),
+    box-shadow 200ms var(--ease-out),
+    color 200ms var(--ease-out),
+    transform 200ms var(--ease-out);
 }
 
 .button:hover:not(:disabled) {
   transform: translateY(-1px);
+}
+
+.button:active:not(:disabled) {
+  transform: scale(0.98);
 }
 
 .button:disabled {
@@ -324,14 +431,16 @@ img {
 }
 
 .button--primary {
-  color: #0a0c0f;
+  color: #ffffff;
   background: var(--forest);
-  border-color: var(--forest);
+  border-color: transparent;
+  box-shadow: var(--shadow-accent);
 }
 
 .button--primary:hover:not(:disabled) {
   background: var(--forest-dark);
-  border-color: var(--forest-dark);
+  border-color: transparent;
+  box-shadow: var(--shadow-accent), 0 0 24px var(--accent-glow);
 }
 
 .button--secondary {
@@ -357,14 +466,17 @@ img {
   height: 38px;
   padding: 0 8px 0 11px;
   color: #858c97;
-  background: #11151a;
+  background: rgba(255, 255, 255, 0.03);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
+  transition:
+    border-color 200ms var(--ease-out),
+    box-shadow 200ms var(--ease-out);
 }
 
 .search-field:focus-within {
-  border-color: rgba(200, 241, 105, 0.64);
-  box-shadow: 0 0 0 3px rgba(200, 241, 105, 0.08);
+  border-color: rgba(94, 106, 210, 0.64);
+  box-shadow: 0 0 0 3px rgba(94, 106, 210, 0.08);
 }
 
 .search-field input {
@@ -407,9 +519,10 @@ img {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   min-height: 116px;
   color: #f5f7f9;
-  background: #101419;
+  background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
   overflow: hidden;
 }
 
@@ -456,8 +569,8 @@ img {
   width: 36px;
   height: 36px;
   color: var(--forest);
-  background: rgba(200, 241, 105, 0.08);
-  border: 1px solid rgba(200, 241, 105, 0.18);
+  background: rgba(94, 106, 210, 0.08);
+  border: 1px solid rgba(94, 106, 210, 0.18);
   border-radius: 50%;
 }
 
@@ -563,24 +676,29 @@ img {
 .entry-card {
   position: relative;
   min-width: 0;
-  background: var(--surface);
+  background: linear-gradient(
+    to bottom,
+    rgba(255, 255, 255, 0.05),
+    rgba(255, 255, 255, 0.02)
+  );
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
   overflow: hidden;
   transition:
-    border-color 160ms ease,
-    box-shadow 160ms ease,
-    transform 160ms ease;
+    border-color 260ms var(--ease-out),
+    box-shadow 260ms var(--ease-out),
+    transform 260ms var(--ease-out);
 }
 
 .entry-card:hover {
-  border-color: #414955;
-  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.28);
-  transform: translateY(-2px);
+  border-color: var(--line-strong);
+  box-shadow: var(--shadow-card-hover);
+  transform: translateY(-4px);
 }
 
 .entry-card:focus-within {
-  outline: 3px solid rgba(200, 241, 105, 0.2);
+  outline: 3px solid rgba(94, 106, 210, 0.2);
   outline-offset: 2px;
 }
 
@@ -721,20 +839,20 @@ img {
 
 .heatmap span[data-level="1"],
 .heatmap-legend i[data-level="1"] {
-  background: rgba(200, 241, 105, 0.22);
-  border-color: rgba(200, 241, 105, 0.25);
+  background: rgba(94, 106, 210, 0.22);
+  border-color: rgba(94, 106, 210, 0.25);
 }
 
 .heatmap span[data-level="2"],
 .heatmap-legend i[data-level="2"] {
-  background: rgba(200, 241, 105, 0.44);
-  border-color: rgba(200, 241, 105, 0.48);
+  background: rgba(94, 106, 210, 0.44);
+  border-color: rgba(94, 106, 210, 0.48);
 }
 
 .heatmap span[data-level="3"],
 .heatmap-legend i[data-level="3"] {
-  background: rgba(200, 241, 105, 0.7);
-  border-color: rgba(200, 241, 105, 0.74);
+  background: rgba(94, 106, 210, 0.7);
+  border-color: rgba(94, 106, 210, 0.74);
 }
 
 .heatmap span[data-level="4"],
@@ -854,7 +972,7 @@ img {
   flex-direction: column;
   justify-content: space-between;
   padding: 10px;
-  background: #101419;
+  background: var(--surface);
   border-right: 1px solid var(--line-strong);
   border-bottom: 1px solid var(--line-strong);
 }
@@ -871,7 +989,7 @@ img {
 }
 
 .calendar-cell[data-has-entry="true"] {
-  background: rgba(200, 241, 105, 0.07);
+  background: rgba(94, 106, 210, 0.07);
 }
 
 .calendar-cell[data-has-entry="true"]::after {
@@ -1070,10 +1188,11 @@ img {
   max-height: calc(100vh - 48px);
   background: var(--paper);
   border: 1px solid var(--line-strong);
-  border-radius: 8px;
-  box-shadow: 0 30px 90px rgba(0, 0, 0, 0.58);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.06),
+    0 30px 90px rgba(0, 0, 0, 0.58), 0 0 120px rgba(94, 106, 210, 0.08);
   overflow: auto;
-  animation: dialog-in 190ms ease both;
+  animation: dialog-in 190ms var(--ease-out) both;
 }
 
 .entry-dialog {
@@ -1099,8 +1218,11 @@ img {
   color: var(--ink);
   background: var(--surface-raised);
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
+  transition:
+    border-color 200ms var(--ease-out),
+    background-color 200ms var(--ease-out);
 }
 
 .entry-dialog__attachments {
@@ -1161,7 +1283,7 @@ img {
 .entry-dialog__media-zoom:hover > span,
 .entry-dialog__media-zoom:focus-visible > span {
   color: var(--forest);
-  border-color: rgba(200, 241, 105, 0.55);
+  border-color: rgba(94, 106, 210, 0.55);
 }
 
 .entry-dialog__media-grid img,
@@ -1553,9 +1675,12 @@ img {
   width: 100%;
   min-width: 0;
   color: var(--ink);
-  background: #0b0e12;
+  background: #0f0f12;
   border: 1px solid var(--line-strong);
-  border-radius: 6px;
+  border-radius: var(--radius-sm);
+  transition:
+    border-color 200ms var(--ease-out),
+    box-shadow 200ms var(--ease-out);
 }
 
 .compose-form input,
@@ -1574,8 +1699,8 @@ img {
 .compose-form input:focus,
 .compose-form textarea:focus,
 .compose-form select:focus {
-  border-color: rgba(200, 241, 105, 0.65);
-  box-shadow: 0 0 0 3px rgba(200, 241, 105, 0.08);
+  border-color: rgba(94, 106, 210, 0.65);
+  box-shadow: 0 0 0 3px rgba(94, 106, 210, 0.08);
 }
 
 .compose-form__row {
@@ -1820,8 +1945,8 @@ img {
   padding: 28px;
   color: var(--forest);
   text-align: center;
-  background: rgba(200, 241, 105, 0.04);
-  border: 1px dashed rgba(200, 241, 105, 0.42);
+  background: rgba(94, 106, 210, 0.04);
+  border: 1px dashed rgba(94, 106, 210, 0.42);
   border-radius: 6px;
 }
 
